@@ -93,3 +93,5 @@ public
 
 # Windows system files
 Thumbs.db
+
+package-lock.json

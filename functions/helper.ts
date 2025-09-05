@@ -25,7 +25,11 @@ export function formatHumanReadable(scores) {
           2,
         )}/100\n\n${Object.entries(s.metrics)
           .map(([k, v]) => `${k}: ${((v as number) * 100).toFixed(2)}%`)
-          .join("\n")}\n\nSUGGESTIONS:\n${s.suggestions.join("\n")}`,
+          .join("\n")}\n\n${
+          s.suggestions.length > 0
+            ? `SUGGESTIONS:\n${s.suggestions.join("\n")}`
+            : "No suggestions, great job!"
+        }`,
     )
     .join("\n\n");
 }

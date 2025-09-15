@@ -1,15 +1,16 @@
 {
-  "name": "typescript-score-check",
+  "name": "@razmans/ts-score-check",
   "version": "1.0.0",
   "description": "TypeScript score check",
   "license": "ISC",
   "author": "",
   "type": "commonjs",
-  "main": "index.ts",
   "scripts": {
-    "build": "tsx",
+    "build": "tsc",
     "start": "node dist/index.js",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test:good": "node dist/index.js test/good",
+    "test:no-good": "node dist/index.js test/no-good"
   },
   "dependencies": {
     "commander": "^14.0.0",
@@ -18,5 +19,18 @@
   "devDependencies": {
     "@types/node": "^24.3.1",
     "typescript": "^5.9.2"
-  }
+  },
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist/**/*"
+  ],
+  "keywords": [
+    "typescript",
+    "npm",
+    "library",
+    "score",
+    "check"
+  ]
 }

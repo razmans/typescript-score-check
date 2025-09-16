@@ -1,4 +1,4 @@
-import { extname, resolve } from "path";
+import { extname, join, resolve } from "path";
 import { readdirSync, statSync } from "fs";
 import {
   Project,
@@ -15,16 +15,20 @@ import { InterfaceInfo } from "./interface";
 
 // Get all TypeScript files in a directory recursively
 export function getTsFiles(dir: string): string[] {
-  const files: string[] = [];
-  for (const file of readdirSync(dir)) {
-    const fullPath = resolve(dir, file);
-    if (statSync(fullPath).isDirectory()) {
-      files.push(...getTsFiles(fullPath));
-    } else if (extname(fullPath) === ".ts" || extname(fullPath) === ".tsx") {
-      files.push(fullPath);
-    }
+  const stats = statSync(dir);
+
+  if (!stats.isDirectory()) {
+    // It's a file, return directly
+    return dir.endsWith(".ts") ? [dir] : [];
   }
-  return files;
+
+  return readdirSync(dir)
+    .map((f) => join(dir, f))
+    .flatMap((f) => {
+      const s = statSync(f);
+      if (s.isDirectory()) return getTsFiles(f);
+      return f.endsWith(".ts") ? [f] : [];
+    });
 }
 
 export interface ScoreMetrics {

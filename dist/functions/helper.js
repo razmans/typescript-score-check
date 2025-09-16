@@ -20,17 +20,19 @@ const fs_1 = require("fs");
 const ts_morph_1 = require("ts-morph");
 // Get all TypeScript files in a directory recursively
 function getTsFiles(dir) {
-    const files = [];
-    for (const file of (0, fs_1.readdirSync)(dir)) {
-        const fullPath = (0, path_1.resolve)(dir, file);
-        if ((0, fs_1.statSync)(fullPath).isDirectory()) {
-            files.push(...getTsFiles(fullPath));
-        }
-        else if ((0, path_1.extname)(fullPath) === ".ts" || (0, path_1.extname)(fullPath) === ".tsx") {
-            files.push(fullPath);
-        }
+    const stats = (0, fs_1.statSync)(dir);
+    if (!stats.isDirectory()) {
+        // It's a file, return directly
+        return dir.endsWith(".ts") ? [dir] : [];
     }
-    return files;
+    return (0, fs_1.readdirSync)(dir)
+        .map((f) => (0, path_1.join)(dir, f))
+        .flatMap((f) => {
+        const s = (0, fs_1.statSync)(f);
+        if (s.isDirectory())
+            return getTsFiles(f);
+        return f.endsWith(".ts") ? [f] : [];
+    });
 }
 function formatHumanReadable(scores) {
     return scores

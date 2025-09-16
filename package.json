@@ -1,6 +1,6 @@
 {
   "name": "@razmans/ts-score-check",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "TypeScript score check",
   "license": "ISC",
   "author": "",
@@ -36,5 +36,9 @@
   ],
   "bin": {
     "ts-score-check": "dist/index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/razmans/typescript-score-check.git"
   }
 }

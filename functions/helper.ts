@@ -1,7 +1,6 @@
-import { extname, join, resolve } from "path";
+import { join } from "path";
 import { readdirSync, statSync } from "fs";
 import {
-  Project,
   SyntaxKind,
   ts,
   SourceFile,
@@ -21,7 +20,6 @@ import {
   SetAccessorDeclaration,
   VariableDeclaration,
 } from "ts-morph";
-import { InterfaceInfo } from "./interface";
 
 // ts-morph's getDescendants*/forEachDescendant recurse once per tree level and
 // overflow the call stack on very deep trees (e.g. a chain of thousands of `+`).
@@ -55,8 +53,20 @@ function descendantsOfKind<K extends SyntaxKind>(
   );
 }
 
+const TS_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts"];
+const DECLARATION_SUFFIXES = [".d.ts", ".d.mts", ".d.cts"];
+
 function isTsFile(path: string): boolean {
-  return path.endsWith(".ts");
+  return TS_EXTENSIONS.some((ext) => path.endsWith(ext));
+}
+
+function isDeclarationFile(path: string): boolean {
+  return DECLARATION_SUFFIXES.some((suffix) => path.endsWith(suffix));
+}
+
+// Directories never worth scoring: dependencies, and hidden ones (.git, .next, ...)
+function isSkippedDirectory(name: string, exclude: string[]): boolean {
+  return name === "node_modules" || name.startsWith(".") || exclude.includes(name);
 }
 
 function errorCode(error: unknown): string {
@@ -64,11 +74,14 @@ function errorCode(error: unknown): string {
   return "unknown error";
 }
 
-// Get all TypeScript files under a path, recursively. Real directories are
-// followed; symlinked directories are skipped (no loops) and broken symlinks or
-// unreadable directories are skipped with a warning on stderr instead of
-// aborting the whole run. Results are sorted for deterministic output.
-export function getTsFiles(path: string): string[] {
+// Get all TypeScript files (.ts, .tsx, .mts, .cts) under a path, recursively.
+// A file path given explicitly is always accepted. In directory scans,
+// node_modules, hidden directories, declaration files (.d.ts) and anything
+// named in `exclude` (file or directory basename) are skipped. Real directories
+// are followed; symlinked directories are skipped (no loops) and broken
+// symlinks or unreadable directories are skipped with a warning on stderr
+// instead of aborting the whole run. Results are sorted for deterministic output.
+export function getTsFiles(path: string, exclude: string[] = []): string[] {
   const stats = statSync(path);
 
   if (!stats.isDirectory()) {
@@ -76,16 +89,21 @@ export function getTsFiles(path: string): string[] {
     return isTsFile(path) ? [path] : [];
   }
 
+  const wanted = (name: string): boolean =>
+    isTsFile(name) && !isDeclarationFile(name) && !exclude.includes(name);
+
   const files: string[] = [];
   for (const entry of readdirSync(path, { withFileTypes: true })) {
     const full = join(path, entry.name);
     try {
       if (entry.isDirectory()) {
-        files.push(...getTsFiles(full));
+        if (!isSkippedDirectory(entry.name, exclude)) {
+          files.push(...getTsFiles(full, exclude));
+        }
       } else if (entry.isSymbolicLink()) {
         // Follow symlinks to files only, never to directories
-        if (statSync(full).isFile() && isTsFile(full)) files.push(full);
-      } else if (entry.isFile() && isTsFile(full)) {
+        if (statSync(full).isFile() && wanted(entry.name)) files.push(full);
+      } else if (entry.isFile() && wanted(entry.name)) {
         files.push(full);
       }
     } catch (error) {

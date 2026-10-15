@@ -7,8 +7,8 @@ const assert = require("assert");
 
 const cli = join(__dirname, "..", "dist", "index.js");
 
-function score(target) {
-  const out = execFileSync(process.execPath, [cli, target, "--json"], {
+function score(target, extraArgs = []) {
+  const out = execFileSync(process.execPath, [cli, target, "--json", ...extraArgs], {
     encoding: "utf8",
   });
   return JSON.parse(out);
@@ -234,6 +234,58 @@ try {
   assert.ok(seconds < 15, `4,000 lets should score quickly, took ${seconds}s`);
 } finally {
   fs.rmSync(lotsDir, { recursive: true, force: true });
+}
+
+// #20: file scan filters
+const scanDir = fs.mkdtempSync(join(os.tmpdir(), "ts-score-check-scan-"));
+try {
+  const write = (rel, text) => {
+    const full = join(scanDir, rel);
+    fs.mkdirSync(join(full, ".."), { recursive: true });
+    fs.writeFileSync(full, text);
+  };
+  write("a.ts", "export const a = 1;\n");
+  write("b.tsx", "export const b = 1;\n");
+  write("c.mts", "export const c = 1;\n");
+  write("d.cts", "export const d = 1;\n");
+  write("types.d.ts", "export declare const t: number;\n");
+  write("node_modules/dep/index.ts", "export const dep = 1;\n");
+  write(".hidden/h.ts", "export const h = 1;\n");
+  write("generated/g.ts", "export const g = 1;\n");
+  write("skipme.ts", "export const s = 1;\n");
+  const names = (args) =>
+    score(scanDir, args).map((r) => basename(r.file)).sort();
+  assert.deepStrictEqual(
+    names(["-e", "generated", "-e", "skipme.ts"]),
+    ["a.ts", "b.tsx", "c.mts", "d.cts"],
+    "scan skips node_modules, hidden dirs, .d.ts and --exclude names",
+  );
+  assert.deepStrictEqual(names([]).includes("g.ts"), true, "no exclude keeps g.ts");
+  // explicit file paths are always accepted, even declaration files
+  assert.strictEqual(score(join(scanDir, "types.d.ts")).length, 1);
+  const none = spawnSync(process.execPath, [cli, join(scanDir, "generated"), "-e", "g.ts"], {
+    encoding: "utf8",
+  });
+  assert.strictEqual(none.status, 1, "no TS files must exit 1");
+  assert.ok(none.stderr.includes("no TypeScript files"), none.stderr);
+} finally {
+  fs.rmSync(scanDir, { recursive: true, force: true });
+}
+
+// #21: version, --min-score
+const pkgVersion = require("../package.json").version;
+const ver = spawnSync(process.execPath, [cli, "--version"], { encoding: "utf8" });
+assert.strictEqual(ver.stdout.trim(), pkgVersion, "--version must match package.json");
+const badFile = join(__dirname, "no-good");
+const below = spawnSync(process.execPath, [cli, badFile, "--min-score", "90"], { encoding: "utf8" });
+assert.strictEqual(below.status, 1, "score below --min-score must exit 1");
+assert.ok(below.stderr.includes("below 90"), below.stderr);
+const above = spawnSync(process.execPath, [cli, badFile, "--min-score", "0"], { encoding: "utf8" });
+assert.strictEqual(above.status, 0, "score at or above --min-score must exit 0");
+for (const bad of ["abc", "101", "-1", ""]) {
+  const r = spawnSync(process.execPath, [cli, badFile, "--min-score", bad], { encoding: "utf8" });
+  assert.strictEqual(r.status, 1, `--min-score "${bad}" must be rejected`);
+  assert.ok(r.stderr.includes("--min-score"), r.stderr);
 }
 
 console.log("All tests passed");

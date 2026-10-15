@@ -29,7 +29,16 @@ npx @razmans/ts-score-check ./src/test.ts
 
 # Analyze an entire directory
 npx @razmans/ts-score-check ./src
+
+# JSON output, skip some names, fail CI below a score of 80
+npx @razmans/ts-score-check ./src --json -e generated -e legacy --min-score 80
 ```
+
+### Options
+- `--json` — output JSON
+- `-e, --exclude <name>` — skip files or directories with this name (repeatable)
+- `--min-score <n>` — exit with code 1 if any file scores below `n` (0-100). Files with no score (`null`) are ignored.
+- `-V, --version` — print the version
 
 ## Output
 For each file, you get:
@@ -39,8 +48,10 @@ For each file, you get:
 - Suggestions for improvement
 
 ### File scanning and errors
-- Directories are scanned recursively for `.ts` files. Symlinked directories are not followed; broken symlinks and unreadable entries are skipped with a warning on stderr.
+- Directories are scanned recursively for `.ts`, `.tsx`, `.mts` and `.cts` files. `node_modules`, hidden directories (`.git`, ...) and declaration files (`.d.ts`, `.d.mts`, `.d.cts`) are skipped, plus anything matched by `--exclude`. A file path passed explicitly is always scored. Symlinked directories are not followed; broken symlinks and unreadable entries are skipped with a warning on stderr.
 - A nonexistent path prints an error and exits with code 1. If a file cannot be scored, a warning is printed and the exit code is 1; other files are still scored.
+- A file with syntax errors is still scored (on what the parser could read), but a warning is printed, the JSON result has a non-empty `parseErrors` array, and the exit code is 1.
+- Finding no TypeScript files prints a warning and exits with code 1.
 
 ## How Scoring Works
 - Each metric is weighted (see `functions/helper.ts`).

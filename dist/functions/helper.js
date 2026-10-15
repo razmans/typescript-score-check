@@ -46,37 +46,52 @@ function descendants(root, skip) {
 function descendantsOfKind(root, kind) {
     return descendants(root).filter((node) => node.getKind() === kind);
 }
+const TS_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts"];
+const DECLARATION_SUFFIXES = [".d.ts", ".d.mts", ".d.cts"];
 function isTsFile(path) {
-    return path.endsWith(".ts");
+    return TS_EXTENSIONS.some((ext) => path.endsWith(ext));
+}
+function isDeclarationFile(path) {
+    return DECLARATION_SUFFIXES.some((suffix) => path.endsWith(suffix));
+}
+// Directories never worth scoring: dependencies, and hidden ones (.git, .next, ...)
+function isSkippedDirectory(name, exclude) {
+    return name === "node_modules" || name.startsWith(".") || exclude.includes(name);
 }
 function errorCode(error) {
     if (error instanceof Error && "code" in error)
         return String(error.code);
     return "unknown error";
 }
-// Get all TypeScript files under a path, recursively. Real directories are
-// followed; symlinked directories are skipped (no loops) and broken symlinks or
-// unreadable directories are skipped with a warning on stderr instead of
-// aborting the whole run. Results are sorted for deterministic output.
-function getTsFiles(path) {
+// Get all TypeScript files (.ts, .tsx, .mts, .cts) under a path, recursively.
+// A file path given explicitly is always accepted. In directory scans,
+// node_modules, hidden directories, declaration files (.d.ts) and anything
+// named in `exclude` (file or directory basename) are skipped. Real directories
+// are followed; symlinked directories are skipped (no loops) and broken
+// symlinks or unreadable directories are skipped with a warning on stderr
+// instead of aborting the whole run. Results are sorted for deterministic output.
+function getTsFiles(path, exclude = []) {
     const stats = (0, fs_1.statSync)(path);
     if (!stats.isDirectory()) {
         // It's a file, return directly
         return isTsFile(path) ? [path] : [];
     }
+    const wanted = (name) => isTsFile(name) && !isDeclarationFile(name) && !exclude.includes(name);
     const files = [];
     for (const entry of (0, fs_1.readdirSync)(path, { withFileTypes: true })) {
         const full = (0, path_1.join)(path, entry.name);
         try {
             if (entry.isDirectory()) {
-                files.push(...getTsFiles(full));
+                if (!isSkippedDirectory(entry.name, exclude)) {
+                    files.push(...getTsFiles(full, exclude));
+                }
             }
             else if (entry.isSymbolicLink()) {
                 // Follow symlinks to files only, never to directories
-                if ((0, fs_1.statSync)(full).isFile() && isTsFile(full))
+                if ((0, fs_1.statSync)(full).isFile() && wanted(entry.name))
                     files.push(full);
             }
-            else if (entry.isFile() && isTsFile(full)) {
+            else if (entry.isFile() && wanted(entry.name)) {
                 files.push(full);
             }
         }

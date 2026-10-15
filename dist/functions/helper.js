@@ -185,10 +185,14 @@ function calculatePreferConst(sourceFile) {
     return total === 0 ? 1 : consts.length / total;
 }
 function calculateAvoidAssertions(sourceFile) {
+    const asNodes = sourceFile.getDescendantsOfKind(ts_morph_1.SyntaxKind.AsExpression);
+    // `as const` is a safe literal narrowing, not an unsafe type assertion
+    const asAssertions = asNodes.filter((n) => n.getTypeNode()?.getText() !== "const").length;
     const assertions = sourceFile.getDescendantsOfKind(ts_morph_1.SyntaxKind.TypeAssertionExpression).length +
-        sourceFile.getDescendantsOfKind(ts_morph_1.SyntaxKind.NonNullExpression).length;
+        sourceFile.getDescendantsOfKind(ts_morph_1.SyntaxKind.NonNullExpression).length +
+        asAssertions;
     // Use a sum of common expression kinds as a proxy for total expressions
-    const asExpressions = sourceFile.getDescendantsOfKind(ts_morph_1.SyntaxKind.AsExpression).length;
+    const asExpressions = asNodes.length;
     const callExpressions = sourceFile.getDescendantsOfKind(ts_morph_1.SyntaxKind.CallExpression).length;
     const binaryExpressions = sourceFile.getDescendantsOfKind(ts_morph_1.SyntaxKind.BinaryExpression).length;
     const totalExpressions = asExpressions + callExpressions + binaryExpressions || 1;

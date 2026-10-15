@@ -9,8 +9,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Ensure full history for versioning
-          ref: main # Explicitly checkout the main branch
+          # Build exactly what was tagged, not whatever is on main
+          ref: ${{ github.event.release.tag_name }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -18,30 +18,19 @@ jobs:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
 
+      # package-lock.json is gitignored, so `npm ci` would fail
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
       - name: Run tests
-        run: npm run test
+        run: npm test
 
-      - name: Build project
-        run: npm run build
-
-      - name: Update package.json version
+      - name: Set package version from release tag
         run: |
-          CURRENT_VERSION=$(node -p "require('./package.json').version")
           RELEASE_VERSION=${{ github.event.release.tag_name }}
           RELEASE_VERSION=${RELEASE_VERSION#v} # Remove 'v' prefix if present
-          if [ "$CURRENT_VERSION" != "$RELEASE_VERSION" ]; then
-            npm version $RELEASE_VERSION --no-git-tag-version
-            git add package.json
-            git commit -m "Update version to $RELEASE_VERSION"
-            git push origin main
-          else
-            echo "Version already set to $CURRENT_VERSION, skipping update"
-          fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Only changes package.json in the runner; nothing is committed or pushed
+          npm version "$RELEASE_VERSION" --no-git-tag-version --allow-same-version
 
       - name: Publish to npm
         run: npm publish --access public

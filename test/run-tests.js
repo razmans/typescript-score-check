@@ -148,6 +148,13 @@ const vars = score(join(__dirname, "var"));
 assert.strictEqual(byName(vars, "using.ts").metrics.avoidVar, 1);
 assert.strictEqual(byName(vars, "var.ts").metrics.avoidVar, 0);
 
+// #18: try/catch adds one path (the catch), not two
+const complexity = score(join(__dirname, "complexity"));
+assert.ok(
+  near(byName(complexity, "try-catch.ts").metrics.complexity, 0.8),
+  "try/catch is complexity 2 (score 0.8), not 3",
+);
+
 // #14: the CLI must not crash on bad paths, bad symlinks or very deep trees
 const tmp = fs.mkdtempSync(join(os.tmpdir(), "ts-score-check-"));
 try {

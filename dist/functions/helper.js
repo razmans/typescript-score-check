@@ -277,7 +277,7 @@ const DECISION_KINDS = new Set([
     ts_morph_1.SyntaxKind.ForOfStatement,
     ts_morph_1.SyntaxKind.WhileStatement,
     ts_morph_1.SyntaxKind.DoStatement,
-    ts_morph_1.SyntaxKind.TryStatement,
+    // `try` is not a branch; only the `catch` adds a path
     ts_morph_1.SyntaxKind.CatchClause,
     ts_morph_1.SyntaxKind.ConditionalExpression,
 ]);

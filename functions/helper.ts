@@ -343,7 +343,7 @@ const DECISION_KINDS: ReadonlySet<SyntaxKind> = new Set([
   SyntaxKind.ForOfStatement,
   SyntaxKind.WhileStatement,
   SyntaxKind.DoStatement,
-  SyntaxKind.TryStatement,
+  // `try` is not a branch; only the `catch` adds a path
   SyntaxKind.CatchClause,
   SyntaxKind.ConditionalExpression,
 ]);

@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.weights = void 0;
 exports.getTsFiles = getTsFiles;
+exports.getSyntaxErrors = getSyntaxErrors;
 exports.formatHumanReadable = formatHumanReadable;
 exports.generateSuggestions = generateSuggestions;
 exports.calculateAvoidAny = calculateAvoidAny;
@@ -45,37 +46,52 @@ function descendants(root, skip) {
 function descendantsOfKind(root, kind) {
     return descendants(root).filter((node) => node.getKind() === kind);
 }
+const TS_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts"];
+const DECLARATION_SUFFIXES = [".d.ts", ".d.mts", ".d.cts"];
 function isTsFile(path) {
-    return path.endsWith(".ts");
+    return TS_EXTENSIONS.some((ext) => path.endsWith(ext));
+}
+function isDeclarationFile(path) {
+    return DECLARATION_SUFFIXES.some((suffix) => path.endsWith(suffix));
+}
+// Directories never worth scoring: dependencies, and hidden ones (.git, .next, ...)
+function isSkippedDirectory(name, exclude) {
+    return name === "node_modules" || name.startsWith(".") || exclude.includes(name);
 }
 function errorCode(error) {
     if (error instanceof Error && "code" in error)
         return String(error.code);
     return "unknown error";
 }
-// Get all TypeScript files under a path, recursively. Real directories are
-// followed; symlinked directories are skipped (no loops) and broken symlinks or
-// unreadable directories are skipped with a warning on stderr instead of
-// aborting the whole run. Results are sorted for deterministic output.
-function getTsFiles(path) {
+// Get all TypeScript files (.ts, .tsx, .mts, .cts) under a path, recursively.
+// A file path given explicitly is always accepted. In directory scans,
+// node_modules, hidden directories, declaration files (.d.ts) and anything
+// named in `exclude` (file or directory basename) are skipped. Real directories
+// are followed; symlinked directories are skipped (no loops) and broken
+// symlinks or unreadable directories are skipped with a warning on stderr
+// instead of aborting the whole run. Results are sorted for deterministic output.
+function getTsFiles(path, exclude = []) {
     const stats = (0, fs_1.statSync)(path);
     if (!stats.isDirectory()) {
         // It's a file, return directly
         return isTsFile(path) ? [path] : [];
     }
+    const wanted = (name) => isTsFile(name) && !isDeclarationFile(name) && !exclude.includes(name);
     const files = [];
     for (const entry of (0, fs_1.readdirSync)(path, { withFileTypes: true })) {
         const full = (0, path_1.join)(path, entry.name);
         try {
             if (entry.isDirectory()) {
-                files.push(...getTsFiles(full));
+                if (!isSkippedDirectory(entry.name, exclude)) {
+                    files.push(...getTsFiles(full, exclude));
+                }
             }
             else if (entry.isSymbolicLink()) {
                 // Follow symlinks to files only, never to directories
-                if ((0, fs_1.statSync)(full).isFile() && isTsFile(full))
+                if ((0, fs_1.statSync)(full).isFile() && wanted(entry.name))
                     files.push(full);
             }
-            else if (entry.isFile() && isTsFile(full)) {
+            else if (entry.isFile() && wanted(entry.name)) {
                 files.push(full);
             }
         }
@@ -85,16 +101,59 @@ function getTsFiles(path) {
     }
     return files.sort();
 }
+// Syntax errors reported by the TypeScript parser, as "line N: message".
+// ts-morph parses broken files without complaint, so they would otherwise
+// look like files with nothing to score. This only parses (no emit, no type
+// checking, no module resolution), so it is cheap and cannot overflow on deep
+// trees the way an emit would.
+function getSyntaxErrors(sourceFile) {
+    const fileName = sourceFile.getFilePath();
+    const parsed = ts_morph_1.ts.createSourceFile(fileName, sourceFile.getFullText(), ts_morph_1.ts.ScriptTarget.Latest);
+    const host = {
+        getSourceFile: (name) => (name === fileName ? parsed : undefined),
+        getDefaultLibFileName: () => "lib.d.ts",
+        writeFile: () => undefined,
+        getCurrentDirectory: () => "",
+        getCanonicalFileName: (name) => name,
+        useCaseSensitiveFileNames: () => true,
+        getNewLine: () => "\n",
+        fileExists: (name) => name === fileName,
+        readFile: () => undefined,
+    };
+    const program = ts_morph_1.ts.createProgram([fileName], { noLib: true, noResolve: true, jsx: ts_morph_1.ts.JsxEmit.Preserve }, host);
+    return program
+        .getSyntacticDiagnostics(parsed)
+        .filter((d) => d.category === ts_morph_1.ts.DiagnosticCategory.Error)
+        .map((d) => {
+        const message = ts_morph_1.ts.flattenDiagnosticMessageText(d.messageText, " ");
+        if (!d.file || d.start === undefined)
+            return message;
+        const { line } = d.file.getLineAndCharacterOfPosition(d.start);
+        return `line ${line + 1}: ${message}`;
+    });
+}
+const MAX_SHOWN_PARSE_ERRORS = 5;
+function formatParseErrors(errors) {
+    if (errors.length === 0)
+        return "";
+    const shown = errors.slice(0, MAX_SHOWN_PARSE_ERRORS).map((e) => `  ${e}`);
+    const hidden = errors.length - shown.length;
+    if (hidden > 0)
+        shown.push(`  ...and ${hidden} more`);
+    return `WARNING: ${errors.length} syntax error(s), scores may be unreliable:\n${shown.join("\n")}\n\n`;
+}
 function formatPercent(value) {
     return value === null ? "n/a" : `${(value * 100).toFixed(2)}%`;
 }
 function formatHumanReadable(scores) {
     return scores
-        .map((s) => `\nFILE: ${s.file}\n\nSCORE: ${s.score === null ? "n/a" : `${s.score.toFixed(2)}/100`}\n\n${Object.entries(s.metrics)
+        .map((s) => `\nFILE: ${s.file}\n\n${formatParseErrors(s.parseErrors)}SCORE: ${s.score === null ? "n/a" : `${s.score.toFixed(2)}/100`}\n\n${Object.entries(s.metrics)
         .map(([k, v]) => `${k}: ${formatPercent(v)}`)
         .join("\n")}\n\n${s.suggestions.length > 0
         ? `SUGGESTIONS:\n${s.suggestions.join("\n")}`
-        : "No suggestions, great job!"}`)
+        : s.parseErrors.length > 0
+            ? ""
+            : "No suggestions, great job!"}`)
         .join("\n\n");
 }
 function isImperfect(value) {
@@ -277,7 +336,7 @@ const DECISION_KINDS = new Set([
     ts_morph_1.SyntaxKind.ForOfStatement,
     ts_morph_1.SyntaxKind.WhileStatement,
     ts_morph_1.SyntaxKind.DoStatement,
-    ts_morph_1.SyntaxKind.TryStatement,
+    // `try` is not a branch; only the `catch` adds a path
     ts_morph_1.SyntaxKind.CatchClause,
     ts_morph_1.SyntaxKind.ConditionalExpression,
 ]);

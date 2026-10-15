@@ -1,7 +1,6 @@
-import { extname, join, resolve } from "path";
+import { join } from "path";
 import { readdirSync, statSync } from "fs";
 import {
-  Project,
   SyntaxKind,
   ts,
   SourceFile,
@@ -21,7 +20,6 @@ import {
   SetAccessorDeclaration,
   VariableDeclaration,
 } from "ts-morph";
-import { InterfaceInfo } from "./interface";
 
 // ts-morph's getDescendants*/forEachDescendant recurse once per tree level and
 // overflow the call stack on very deep trees (e.g. a chain of thousands of `+`).
@@ -55,8 +53,20 @@ function descendantsOfKind<K extends SyntaxKind>(
   );
 }
 
+const TS_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts"];
+const DECLARATION_SUFFIXES = [".d.ts", ".d.mts", ".d.cts"];
+
 function isTsFile(path: string): boolean {
-  return path.endsWith(".ts");
+  return TS_EXTENSIONS.some((ext) => path.endsWith(ext));
+}
+
+function isDeclarationFile(path: string): boolean {
+  return DECLARATION_SUFFIXES.some((suffix) => path.endsWith(suffix));
+}
+
+// Directories never worth scoring: dependencies, and hidden ones (.git, .next, ...)
+function isSkippedDirectory(name: string, exclude: string[]): boolean {
+  return name === "node_modules" || name.startsWith(".") || exclude.includes(name);
 }
 
 function errorCode(error: unknown): string {
@@ -64,11 +74,14 @@ function errorCode(error: unknown): string {
   return "unknown error";
 }
 
-// Get all TypeScript files under a path, recursively. Real directories are
-// followed; symlinked directories are skipped (no loops) and broken symlinks or
-// unreadable directories are skipped with a warning on stderr instead of
-// aborting the whole run. Results are sorted for deterministic output.
-export function getTsFiles(path: string): string[] {
+// Get all TypeScript files (.ts, .tsx, .mts, .cts) under a path, recursively.
+// A file path given explicitly is always accepted. In directory scans,
+// node_modules, hidden directories, declaration files (.d.ts) and anything
+// named in `exclude` (file or directory basename) are skipped. Real directories
+// are followed; symlinked directories are skipped (no loops) and broken
+// symlinks or unreadable directories are skipped with a warning on stderr
+// instead of aborting the whole run. Results are sorted for deterministic output.
+export function getTsFiles(path: string, exclude: string[] = []): string[] {
   const stats = statSync(path);
 
   if (!stats.isDirectory()) {
@@ -76,16 +89,21 @@ export function getTsFiles(path: string): string[] {
     return isTsFile(path) ? [path] : [];
   }
 
+  const wanted = (name: string): boolean =>
+    isTsFile(name) && !isDeclarationFile(name) && !exclude.includes(name);
+
   const files: string[] = [];
   for (const entry of readdirSync(path, { withFileTypes: true })) {
     const full = join(path, entry.name);
     try {
       if (entry.isDirectory()) {
-        files.push(...getTsFiles(full));
+        if (!isSkippedDirectory(entry.name, exclude)) {
+          files.push(...getTsFiles(full, exclude));
+        }
       } else if (entry.isSymbolicLink()) {
         // Follow symlinks to files only, never to directories
-        if (statSync(full).isFile() && isTsFile(full)) files.push(full);
-      } else if (entry.isFile() && isTsFile(full)) {
+        if (statSync(full).isFile() && wanted(entry.name)) files.push(full);
+      } else if (entry.isFile() && wanted(entry.name)) {
         files.push(full);
       }
     } catch (error) {
@@ -108,6 +126,58 @@ export interface ScoreResult {
   score: number | null;
   metrics: ScoreMetrics;
   suggestions: string[];
+  // Syntax errors found by the TypeScript parser ("line N: message"). When
+  // present, the metrics were computed on a partially parsed file.
+  parseErrors: string[];
+}
+
+// Syntax errors reported by the TypeScript parser, as "line N: message".
+// ts-morph parses broken files without complaint, so they would otherwise
+// look like files with nothing to score. This only parses (no emit, no type
+// checking, no module resolution), so it is cheap and cannot overflow on deep
+// trees the way an emit would.
+export function getSyntaxErrors(sourceFile: SourceFile): string[] {
+  const fileName = sourceFile.getFilePath();
+  const parsed = ts.createSourceFile(
+    fileName,
+    sourceFile.getFullText(),
+    ts.ScriptTarget.Latest,
+  );
+  const host: ts.CompilerHost = {
+    getSourceFile: (name) => (name === fileName ? parsed : undefined),
+    getDefaultLibFileName: () => "lib.d.ts",
+    writeFile: () => undefined,
+    getCurrentDirectory: () => "",
+    getCanonicalFileName: (name) => name,
+    useCaseSensitiveFileNames: () => true,
+    getNewLine: () => "\n",
+    fileExists: (name) => name === fileName,
+    readFile: () => undefined,
+  };
+  const program = ts.createProgram(
+    [fileName],
+    { noLib: true, noResolve: true, jsx: ts.JsxEmit.Preserve },
+    host,
+  );
+  return program
+    .getSyntacticDiagnostics(parsed)
+    .filter((d) => d.category === ts.DiagnosticCategory.Error)
+    .map((d) => {
+      const message = ts.flattenDiagnosticMessageText(d.messageText, " ");
+      if (!d.file || d.start === undefined) return message;
+      const { line } = d.file.getLineAndCharacterOfPosition(d.start);
+      return `line ${line + 1}: ${message}`;
+    });
+}
+
+const MAX_SHOWN_PARSE_ERRORS = 5;
+
+function formatParseErrors(errors: string[]): string {
+  if (errors.length === 0) return "";
+  const shown = errors.slice(0, MAX_SHOWN_PARSE_ERRORS).map((e) => `  ${e}`);
+  const hidden = errors.length - shown.length;
+  if (hidden > 0) shown.push(`  ...and ${hidden} more`);
+  return `WARNING: ${errors.length} syntax error(s), scores may be unreliable:\n${shown.join("\n")}\n\n`;
 }
 
 function formatPercent(value: MetricValue): string {
@@ -118,14 +188,16 @@ export function formatHumanReadable(scores: ScoreResult[]): string {
   return scores
     .map(
       (s) =>
-        `\nFILE: ${s.file}\n\nSCORE: ${
+        `\nFILE: ${s.file}\n\n${formatParseErrors(s.parseErrors)}SCORE: ${
           s.score === null ? "n/a" : `${s.score.toFixed(2)}/100`
         }\n\n${Object.entries(s.metrics)
           .map(([k, v]) => `${k}: ${formatPercent(v)}`)
           .join("\n")}\n\n${
           s.suggestions.length > 0
             ? `SUGGESTIONS:\n${s.suggestions.join("\n")}`
-            : "No suggestions, great job!"
+            : s.parseErrors.length > 0
+              ? ""
+              : "No suggestions, great job!"
         }`,
     )
     .join("\n\n");
@@ -343,7 +415,7 @@ const DECISION_KINDS: ReadonlySet<SyntaxKind> = new Set([
   SyntaxKind.ForOfStatement,
   SyntaxKind.WhileStatement,
   SyntaxKind.DoStatement,
-  SyntaxKind.TryStatement,
+  // `try` is not a branch; only the `catch` adds a path
   SyntaxKind.CatchClause,
   SyntaxKind.ConditionalExpression,
 ]);

@@ -1,0 +1,1 @@
+const fine = 1;

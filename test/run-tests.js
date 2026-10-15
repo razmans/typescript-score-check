@@ -36,4 +36,14 @@ assert.strictEqual(
   "`as const` must not count as an assertion",
 );
 
+// #8: nothing to measure means n/a (null), not a perfect score
+const empty = score(join(__dirname, "empty"))[0];
+assert.strictEqual(empty.score, null, "empty file must have no score");
+for (const [name, value] of Object.entries(empty.metrics)) {
+  assert.strictEqual(value, null, `empty file metric ${name} must be n/a`);
+}
+// Inapplicable metrics are excluded rather than counted as 100%
+assert.strictEqual(good.metrics.accessModifiers, null);
+assert.strictEqual(good.metrics.useReadonly, null);
+
 console.log("All tests passed");

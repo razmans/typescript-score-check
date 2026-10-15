@@ -31,25 +31,33 @@ export function getTsFiles(dir: string): string[] {
     });
 }
 
+// A metric is `null` when the file has nothing to measure (e.g. no classes
+// for accessModifiers). Null metrics are shown as n/a and excluded from the score.
+export type MetricValue = number | null;
+
 export interface ScoreMetrics {
-  [key: string]: number;
+  [key: string]: MetricValue;
 }
 
 export interface ScoreResult {
   file: string;
-  score: number;
+  score: number | null;
   metrics: ScoreMetrics;
   suggestions: string[];
+}
+
+function formatPercent(value: MetricValue): string {
+  return value === null ? "n/a" : `${(value * 100).toFixed(2)}%`;
 }
 
 export function formatHumanReadable(scores: ScoreResult[]): string {
   return scores
     .map(
       (s) =>
-        `\nFILE: ${s.file}\n\nSCORE: ${s.score.toFixed(
-          2,
-        )}/100\n\n${Object.entries(s.metrics)
-          .map(([k, v]) => `${k}: ${((v as number) * 100).toFixed(2)}%`)
+        `\nFILE: ${s.file}\n\nSCORE: ${
+          s.score === null ? "n/a" : `${s.score.toFixed(2)}/100`
+        }\n\n${Object.entries(s.metrics)
+          .map(([k, v]) => `${k}: ${formatPercent(v)}`)
           .join("\n")}\n\n${
           s.suggestions.length > 0
             ? `SUGGESTIONS:\n${s.suggestions.join("\n")}`
@@ -59,33 +67,37 @@ export function formatHumanReadable(scores: ScoreResult[]): string {
     .join("\n\n");
 }
 
-export function generateSuggestions(metrics: Record<string, number>): string[] {
+function isImperfect(value: MetricValue | undefined): boolean {
+  return value !== null && value !== undefined && value < 1;
+}
+
+export function generateSuggestions(metrics: ScoreMetrics): string[] {
   const suggestions: string[] = [];
-  if (metrics.avoidAny < 1)
+  if (isImperfect(metrics.avoidAny))
     suggestions.push("Replace `any` with specific types or `unknown`.");
-  if (metrics.returnTypes < 1)
+  if (isImperfect(metrics.returnTypes))
     suggestions.push("Add explicit return types to functions.");
-  if (metrics.accessModifiers < 1)
+  if (isImperfect(metrics.accessModifiers))
     suggestions.push("Add access modifiers (public/private) to class members.");
-  if (metrics.complexity < 1)
+  if (isImperfect(metrics.complexity))
     suggestions.push(
       "Simplify functions with high complexity by extracting logic.",
     );
-  if (metrics.nesting < 1)
+  if (isImperfect(metrics.nesting))
     suggestions.push(
       "Reduce nesting with early returns or function extraction.",
     );
-  if (metrics.preferConst < 1)
+  if (isImperfect(metrics.preferConst))
     suggestions.push(
       "Use `const` instead of `let` for non-reassigned variables.",
     );
-  if (metrics.avoidAssertions < 1)
+  if (isImperfect(metrics.avoidAssertions))
     suggestions.push("Replace type assertions with type guards.");
-  if (metrics.useReadonly < 1)
+  if (isImperfect(metrics.useReadonly))
     suggestions.push("Mark immutable properties as `readonly`.");
-  if (metrics.avoidVar < 1)
+  if (isImperfect(metrics.avoidVar))
     suggestions.push("Replace `var` with `let` or `const`.");
-  if (metrics.optionalChaining < 1)
+  if (isImperfect(metrics.optionalChaining))
     suggestions.push(
       "Use optional chaining (`?.`) and nullish coalescing (`??`) for null checks.",
     );
@@ -105,7 +117,7 @@ export const weights: Record<string, number> = {
   optionalChaining: 10,
 };
 
-export function calculateAvoidAny(sourceFile: SourceFile): number {
+export function calculateAvoidAny(sourceFile: SourceFile): MetricValue {
   const anyCount = sourceFile.getDescendantsOfKind(
     SyntaxKind.AnyKeyword,
   ).length;
@@ -113,23 +125,23 @@ export function calculateAvoidAny(sourceFile: SourceFile): number {
     SyntaxKind.TypeReference,
   ).length;
   // Use total type nodes as denominator, fallback to total nodes if 0
-  const denominator =
-    typeRefCount > 0 ? typeRefCount : anyCount > 0 ? anyCount : 1;
+  const denominator = typeRefCount > 0 ? typeRefCount : anyCount;
+  if (denominator === 0) return null;
   return 1 - anyCount / denominator;
 }
 
-export function calculateReturnTypes(sourceFile: SourceFile): number {
+export function calculateReturnTypes(sourceFile: SourceFile): MetricValue {
   const functions = sourceFile.getFunctions();
-  if (functions.length === 0) return 1;
+  if (functions.length === 0) return null;
   const withReturn = functions.filter((f: FunctionDeclaration) =>
     f.getReturnTypeNode(),
   ).length;
   return withReturn / functions.length;
 }
 
-export function calculateAccessModifiers(sourceFile: SourceFile): number {
+export function calculateAccessModifiers(sourceFile: SourceFile): MetricValue {
   const classes = sourceFile.getClasses();
-  if (classes.length === 0) return 1;
+  if (classes.length === 0) return null;
   let members = 0;
   let withModifiers = 0;
   classes.forEach((cls: ClassDeclaration) => {
@@ -144,12 +156,12 @@ export function calculateAccessModifiers(sourceFile: SourceFile): number {
       }
     });
   });
-  return members === 0 ? 1 : withModifiers / members;
+  return members === 0 ? null : withModifiers / members;
 }
 
-export function calculateComplexity(sourceFile: SourceFile): number {
+export function calculateComplexity(sourceFile: SourceFile): MetricValue {
   const functions = sourceFile.getFunctions();
-  if (functions.length === 0) return 1;
+  if (functions.length === 0) return null;
   let totalComplexity = 0;
   functions.forEach((f: FunctionDeclaration) => {
     let complexity = 1;
@@ -186,9 +198,9 @@ export function calculateComplexity(sourceFile: SourceFile): number {
   return Math.max(0, 1 - (avgComplexity - 1) / 5); // Lowered threshold to 6 for more sensitivity
 }
 
-export function calculateNesting(sourceFile: SourceFile): number {
+export function calculateNesting(sourceFile: SourceFile): MetricValue {
   const functions = sourceFile.getFunctions();
-  if (functions.length === 0) return 1;
+  if (functions.length === 0) return null;
   let maxNesting = 0;
 
   function getNesting(node: Node, current = 0): number {
@@ -220,7 +232,7 @@ export function calculateNesting(sourceFile: SourceFile): number {
   return Math.max(0, 1 - maxNesting / 4);
 }
 
-export function calculatePreferConst(sourceFile: SourceFile): number {
+export function calculatePreferConst(sourceFile: SourceFile): MetricValue {
   const lets = sourceFile
     .getDescendantsOfKind(SyntaxKind.VariableDeclaration)
     .filter(
@@ -236,10 +248,10 @@ export function calculatePreferConst(sourceFile: SourceFile): number {
         v.getParent().getFlags() & ts.NodeFlags.Const,
     );
   const total = lets.length + consts.length;
-  return total === 0 ? 1 : consts.length / total;
+  return total === 0 ? null : consts.length / total;
 }
 
-export function calculateAvoidAssertions(sourceFile: SourceFile): number {
+export function calculateAvoidAssertions(sourceFile: SourceFile): MetricValue {
   const asNodes = sourceFile.getDescendantsOfKind(SyntaxKind.AsExpression);
   // `as const` is a safe literal narrowing, not an unsafe type assertion
   const asAssertions = asNodes.filter(
@@ -257,16 +269,16 @@ export function calculateAvoidAssertions(sourceFile: SourceFile): number {
   const binaryExpressions = sourceFile.getDescendantsOfKind(
     SyntaxKind.BinaryExpression,
   ).length;
-  const totalExpressions =
-    asExpressions + callExpressions + binaryExpressions || 1;
+  const totalExpressions = asExpressions + callExpressions + binaryExpressions;
+  if (totalExpressions === 0) return null;
   return 1 - assertions / totalExpressions;
 }
 
-export function calculateUseReadonly(sourceFile: SourceFile): number {
+export function calculateUseReadonly(sourceFile: SourceFile): MetricValue {
   const properties = sourceFile.getDescendantsOfKind(
     SyntaxKind.PropertyDeclaration,
   );
-  if (properties.length === 0) return 1;
+  if (properties.length === 0) return null;
   // Only PropertyDeclaration nodes have getStructure().isReadonly
   const readonlyCount = properties.filter((p: Node) => {
     // Defensive: check getStructure exists and isReadonly is true
@@ -278,9 +290,12 @@ export function calculateUseReadonly(sourceFile: SourceFile): number {
   return readonlyCount / properties.length;
 }
 
-export function calculateAvoidVar(sourceFile: SourceFile): number {
-  return sourceFile
-    .getDescendantsOfKind(SyntaxKind.VariableDeclaration)
+export function calculateAvoidVar(sourceFile: SourceFile): MetricValue {
+  const declarations = sourceFile.getDescendantsOfKind(
+    SyntaxKind.VariableDeclaration,
+  );
+  if (declarations.length === 0) return null;
+  return declarations
     .some(
       (v: VariableDeclaration) =>
         v.getParent().getKind() === SyntaxKind.VariableDeclarationList &&
@@ -290,7 +305,7 @@ export function calculateAvoidVar(sourceFile: SourceFile): number {
     : 1;
 }
 
-export function calculateOptionalChaining(sourceFile: SourceFile): number {
+export function calculateOptionalChaining(sourceFile: SourceFile): MetricValue {
   // Improved: Check for patterns like x && x.y (manual) vs x?.y (modern)
   let manualNullChecks = 0;
   let modernOperators = 0;
@@ -311,21 +326,22 @@ export function calculateOptionalChaining(sourceFile: SourceFile): number {
   modernOperators += sourceFile.getDescendantsOfKind(
     SyntaxKind.QuestionQuestionToken,
   ).length;
-  const totalNullChecks = manualNullChecks + modernOperators || 1;
+  const totalNullChecks = manualNullChecks + modernOperators;
+  if (totalNullChecks === 0) return null;
   return modernOperators / totalNullChecks;
   // Removed stray closing brace at end of file
 }
 
-export function calculateScore(metrics: Record<string, number>): number {
-  // Only use metrics that have a defined weight
-  const weightedSum = Object.entries(metrics).reduce(
-    (sum, [key, value]) =>
-      weights[key] !== undefined ? sum + weights[key] * (value as number) : sum,
-    0,
-  );
-  const totalWeight = Object.keys(weights).reduce(
-    (sum, k) => sum + weights[k],
-    0,
-  );
-  return totalWeight > 0 ? (weightedSum / totalWeight) * 100 : 0;
+export function calculateScore(metrics: ScoreMetrics): number | null {
+  // Only metrics that have a defined weight and applied to this file count;
+  // weights are re-normalised over the applicable metrics.
+  let weightedSum = 0;
+  let totalWeight = 0;
+  for (const [key, value] of Object.entries(metrics)) {
+    const weight = weights[key];
+    if (weight === undefined || value === null) continue;
+    weightedSum += weight * value;
+    totalWeight += weight;
+  }
+  return totalWeight > 0 ? (weightedSum / totalWeight) * 100 : null;
 }

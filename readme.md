@@ -38,6 +38,10 @@ For each file, you get:
 - Metrics breakdown (percentage for each metric)
 - Suggestions for improvement
 
+### File scanning and errors
+- Directories are scanned recursively for `.ts` files. Symlinked directories are not followed; broken symlinks and unreadable entries are skipped with a warning on stderr.
+- A nonexistent path prints an error and exits with code 1. If a file cannot be scored, a warning is printed and the exit code is 1; other files are still scored.
+
 ## How Scoring Works
 - Each metric is weighted (see `functions/helper.ts`).
 - The score is a weighted sum of all metrics, normalized to 100.

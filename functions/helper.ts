@@ -13,6 +13,7 @@ import {
   ConditionalExpression,
   ArrowFunction,
   ConstructorDeclaration,
+  KindToNodeMappings,
   FunctionDeclaration,
   FunctionExpression,
   GetAccessorDeclaration,
@@ -22,22 +23,76 @@ import {
 } from "ts-morph";
 import { InterfaceInfo } from "./interface";
 
-// Get all TypeScript files in a directory recursively
-export function getTsFiles(dir: string): string[] {
-  const stats = statSync(dir);
+// ts-morph's getDescendants*/forEachDescendant recurse once per tree level and
+// overflow the call stack on very deep trees (e.g. a chain of thousands of `+`).
+// These helpers walk with an explicit stack in document order instead.
+// `skip` stops the walk at a node: the node and its subtree are left out.
+function descendants(root: Node, skip?: (node: Node) => boolean): Node[] {
+  const result: Node[] = [];
+  const stack: Node[] = [];
+  const pushChildren = (node: Node): void => {
+    const children: Node[] = [];
+    node.forEachChild((child: Node) => {
+      children.push(child);
+    });
+    for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
+  };
+  pushChildren(root);
+  for (let node = stack.pop(); node; node = stack.pop()) {
+    if (skip?.(node)) continue;
+    result.push(node);
+    pushChildren(node);
+  }
+  return result;
+}
+
+function descendantsOfKind<K extends SyntaxKind>(
+  root: Node,
+  kind: K,
+): KindToNodeMappings[K][] {
+  return descendants(root).filter(
+    (node): node is KindToNodeMappings[K] => node.getKind() === kind,
+  );
+}
+
+function isTsFile(path: string): boolean {
+  return path.endsWith(".ts");
+}
+
+function errorCode(error: unknown): string {
+  if (error instanceof Error && "code" in error) return String(error.code);
+  return "unknown error";
+}
+
+// Get all TypeScript files under a path, recursively. Real directories are
+// followed; symlinked directories are skipped (no loops) and broken symlinks or
+// unreadable directories are skipped with a warning on stderr instead of
+// aborting the whole run. Results are sorted for deterministic output.
+export function getTsFiles(path: string): string[] {
+  const stats = statSync(path);
 
   if (!stats.isDirectory()) {
     // It's a file, return directly
-    return dir.endsWith(".ts") ? [dir] : [];
+    return isTsFile(path) ? [path] : [];
   }
 
-  return readdirSync(dir)
-    .map((f) => join(dir, f))
-    .flatMap((f) => {
-      const s = statSync(f);
-      if (s.isDirectory()) return getTsFiles(f);
-      return f.endsWith(".ts") ? [f] : [];
-    });
+  const files: string[] = [];
+  for (const entry of readdirSync(path, { withFileTypes: true })) {
+    const full = join(path, entry.name);
+    try {
+      if (entry.isDirectory()) {
+        files.push(...getTsFiles(full));
+      } else if (entry.isSymbolicLink()) {
+        // Follow symlinks to files only, never to directories
+        if (statSync(full).isFile() && isTsFile(full)) files.push(full);
+      } else if (entry.isFile() && isTsFile(full)) {
+        files.push(full);
+      }
+    } catch (error) {
+      console.error(`warning: skipped ${full} (${errorCode(error)})`);
+    }
+  }
+  return files.sort();
 }
 
 // A metric is `null` when the file has nothing to measure (e.g. no classes
@@ -148,7 +203,7 @@ const ATOMIC_TYPE_KINDS: ReadonlySet<SyntaxKind> = new Set([
 export function calculateAvoidAny(sourceFile: SourceFile): MetricValue {
   let anyCount = 0;
   let atomicTypeCount = 0;
-  for (const node of sourceFile.getDescendants()) {
+  for (const node of descendants(sourceFile)) {
     const kind = node.getKind();
     if (!ATOMIC_TYPE_KINDS.has(kind)) continue;
     // `void expr` also contains a VoidKeyword token; it is not a type
@@ -221,8 +276,7 @@ function isFunctionUnit(fn: FunctionLike): boolean {
 }
 
 function getFunctionUnits(sourceFile: SourceFile): FunctionLike[] {
-  return sourceFile
-    .getDescendants()
+  return descendants(sourceFile)
     .filter(isFunctionLike)
     .filter(isFunctionUnit);
 }
@@ -278,15 +332,7 @@ export function calculateAccessModifiers(sourceFile: SourceFile): MetricValue {
 // Descendants of a unit, excluding the bodies of nested units (those are
 // scored on their own). Inline callbacks are included.
 function getOwnDescendants(unit: FunctionLike): Node[] {
-  const nodes: Node[] = [];
-  unit.forEachDescendant((node, traversal) => {
-    if (isFunctionLike(node) && isFunctionUnit(node)) {
-      traversal.skip();
-      return;
-    }
-    nodes.push(node);
-  });
-  return nodes;
+  return descendants(unit, (node) => isFunctionLike(node) && isFunctionUnit(node));
 }
 
 const DECISION_KINDS: ReadonlySet<SyntaxKind> = new Set([
@@ -338,15 +384,32 @@ const NESTING_KINDS: ReadonlySet<SyntaxKind> = new Set([
   SyntaxKind.DoStatement,
 ]);
 
-function getNesting(node: Node, current = 0): number {
-  let localMax = current;
-  node.forEachChild((child: Node) => {
-    // nested units are scored on their own
-    if (isFunctionLike(child) && isFunctionUnit(child)) return;
-    const depth = NESTING_KINDS.has(child.getKind()) ? current + 1 : current;
-    localMax = Math.max(localMax, getNesting(child, depth));
-  });
-  return localMax;
+// `else if` is flat control flow, not a deeper level of nesting
+function isElseIf(node: Node, parent: Node): boolean {
+  return (
+    Node.isIfStatement(node) &&
+    Node.isIfStatement(parent) &&
+    parent.getElseStatement() === node
+  );
+}
+
+// Iterative (explicit stack) so very deep trees, such as a very long chain of
+// binary expressions, cannot overflow the call stack.
+function getNesting(root: Node): number {
+  let maxDepth = 0;
+  const stack: { node: Node; depth: number }[] = [{ node: root, depth: 0 }];
+  for (let item = stack.pop(); item; item = stack.pop()) {
+    const { node, depth } = item;
+    maxDepth = Math.max(maxDepth, depth);
+    node.forEachChild((child: Node) => {
+      // nested units are scored on their own
+      if (isFunctionLike(child) && isFunctionUnit(child)) return;
+      const increases =
+        NESTING_KINDS.has(child.getKind()) && !isElseIf(child, node);
+      stack.push({ node: child, depth: increases ? depth + 1 : depth });
+    });
+  }
+  return maxDepth;
 }
 
 export function calculateNesting(sourceFile: SourceFile): MetricValue {
@@ -437,8 +500,7 @@ function isWriteReference(id: Identifier): boolean {
 function bindingIdentifiers(declaration: VariableDeclaration): Identifier[] {
   const name = declaration.getNameNode();
   if (Node.isIdentifier(name)) return [name];
-  return name
-    .getDescendantsOfKind(SyntaxKind.BindingElement)
+  return descendantsOfKind(name, SyntaxKind.BindingElement)
     .map((element) => element.getNameNode())
     .filter((n): n is Identifier => Node.isIdentifier(n));
 }
@@ -465,30 +527,55 @@ function letScope(declaration: VariableDeclaration): Node {
   );
 }
 
+// Every identifier that is written to (assignment, ++/--, destructuring
+// assignment, loop variable), grouped by name. Computed once per file so each
+// `let` is a map lookup instead of a scan of its whole scope.
+function collectWriteReferences(
+  sourceFile: SourceFile,
+): Map<string, Identifier[]> {
+  const writes = new Map<string, Identifier[]>();
+  for (const id of descendantsOfKind(sourceFile, SyntaxKind.Identifier)) {
+    if (!isWriteReference(id)) continue;
+    const name = id.getText();
+    const existing = writes.get(name);
+    if (existing) existing.push(id);
+    else writes.set(name, [id]);
+  }
+  return writes;
+}
+
 // A `let` is justified if it is reassigned anywhere in its scope (counters,
 // accumulators, `i++` loops, destructuring assignment) or is declared without
 // an initializer (deferred assignment). Name matching is syntactic, so a
 // shadowing variable's writes can make this lenient, never stricter.
-function needsLet(declaration: VariableDeclaration): boolean {
+function needsLet(
+  declaration: VariableDeclaration,
+  writes: Map<string, Identifier[]>,
+): boolean {
   const loopStatement = declaration.getParent()?.getParent();
   const isLoopVariable =
     !!loopStatement &&
     (Node.isForInStatement(loopStatement) ||
       Node.isForOfStatement(loopStatement));
   if (!declaration.getInitializer() && !isLoopVariable) return true;
-  const names = new Set(bindingIdentifiers(declaration).map((i) => i.getText()));
-  return letScope(declaration)
-    .getDescendantsOfKind(SyntaxKind.Identifier)
-    .some((id) => names.has(id.getText()) && isWriteReference(id));
+  const scope = letScope(declaration);
+  const scopeStart = scope.getPos();
+  const scopeEnd = scope.getEnd();
+  return bindingIdentifiers(declaration).some((binding) =>
+    (writes.get(binding.getText()) ?? []).some(
+      (id) => id.getPos() >= scopeStart && id.getEnd() <= scopeEnd,
+    ),
+  );
 }
 
 export function calculatePreferConst(sourceFile: SourceFile): MetricValue {
-  const declarations = sourceFile
-    .getDescendantsOfKind(SyntaxKind.VariableDeclaration)
-    .filter((v: VariableDeclaration) => {
-      const list = v.getParent();
-      return list.getKind() === SyntaxKind.VariableDeclarationList;
-    });
+  const declarations = descendantsOfKind(
+    sourceFile,
+    SyntaxKind.VariableDeclaration,
+  ).filter(
+    (v: VariableDeclaration) =>
+      v.getParent().getKind() === SyntaxKind.VariableDeclarationList,
+  );
   const lets = declarations.filter(
     (v) => v.getParent().getFlags() & ts.NodeFlags.Let,
   );
@@ -497,35 +584,44 @@ export function calculatePreferConst(sourceFile: SourceFile): MetricValue {
   );
   const total = lets.length + consts.length;
   if (total === 0) return null;
-  const unnecessaryLets = lets.filter((v) => !needsLet(v)).length;
+  const writes = lets.length > 0 ? collectWriteReferences(sourceFile) : new Map();
+  const unnecessaryLets = lets.filter((v) => !needsLet(v, writes)).length;
   return 1 - unnecessaryLets / total;
 }
 
 export function calculateAvoidAssertions(sourceFile: SourceFile): MetricValue {
-  const asNodes = sourceFile.getDescendantsOfKind(SyntaxKind.AsExpression);
+  const asNodes = descendantsOfKind(sourceFile, SyntaxKind.AsExpression);
   // `as const` is a safe literal narrowing, not an unsafe type assertion
   const asAssertions = asNodes.filter(
     (n) => n.getTypeNode()?.getText() !== "const",
   ).length;
-  const assertions =
-    sourceFile.getDescendantsOfKind(SyntaxKind.TypeAssertionExpression).length +
-    sourceFile.getDescendantsOfKind(SyntaxKind.NonNullExpression).length +
-    asAssertions;
-  // Use a sum of common expression kinds as a proxy for total expressions
-  const asExpressions = asNodes.length;
-  const callExpressions = sourceFile.getDescendantsOfKind(
+  const angleBracketAssertions = descendantsOfKind(sourceFile, 
+    SyntaxKind.TypeAssertionExpression,
+  ).length;
+  const nonNullAssertions = descendantsOfKind(sourceFile, 
+    SyntaxKind.NonNullExpression,
+  ).length;
+  const assertions = asAssertions + angleBracketAssertions + nonNullAssertions;
+  // Every assertion kind is also part of the denominator, so the ratio can
+  // never exceed 1. Calls and binary expressions are a proxy for "other code".
+  const callExpressions = descendantsOfKind(sourceFile, 
     SyntaxKind.CallExpression,
   ).length;
-  const binaryExpressions = sourceFile.getDescendantsOfKind(
+  const binaryExpressions = descendantsOfKind(sourceFile, 
     SyntaxKind.BinaryExpression,
   ).length;
-  const totalExpressions = asExpressions + callExpressions + binaryExpressions;
+  const totalExpressions =
+    asNodes.length +
+    angleBracketAssertions +
+    nonNullAssertions +
+    callExpressions +
+    binaryExpressions;
   if (totalExpressions === 0) return null;
-  return 1 - assertions / totalExpressions;
+  return Math.max(0, 1 - assertions / totalExpressions);
 }
 
 export function calculateUseReadonly(sourceFile: SourceFile): MetricValue {
-  const properties = sourceFile.getDescendantsOfKind(
+  const properties = descendantsOfKind(sourceFile, 
     SyntaxKind.PropertyDeclaration,
   );
   if (properties.length === 0) return null;
@@ -540,8 +636,12 @@ export function calculateUseReadonly(sourceFile: SourceFile): MetricValue {
   return readonlyCount / properties.length;
 }
 
+// `using` / `await using` declarations are block scoped too, not `var`
+const BLOCK_SCOPED_FLAGS =
+  ts.NodeFlags.Let | ts.NodeFlags.Const | ts.NodeFlags.Using;
+
 export function calculateAvoidVar(sourceFile: SourceFile): MetricValue {
-  const declarations = sourceFile.getDescendantsOfKind(
+  const declarations = descendantsOfKind(sourceFile, 
     SyntaxKind.VariableDeclaration,
   );
   if (declarations.length === 0) return null;
@@ -549,7 +649,7 @@ export function calculateAvoidVar(sourceFile: SourceFile): MetricValue {
     .some(
       (v: VariableDeclaration) =>
         v.getParent().getKind() === SyntaxKind.VariableDeclarationList &&
-        !(v.getParent().getFlags() & (ts.NodeFlags.Let | ts.NodeFlags.Const)),
+        !(v.getParent().getFlags() & BLOCK_SCOPED_FLAGS),
     )
     ? 0
     : 1;
@@ -672,15 +772,13 @@ export function calculateOptionalChaining(sourceFile: SourceFile): MetricValue {
   // Manual null-check patterns (`x && x.y`, `x ? x.y : d`) vs modern operators
   // (`?.`, `??`). Plain boolean logic such as `a > 1 && b < 2` is not counted.
   const manualNullChecks =
-    sourceFile
-      .getDescendantsOfKind(SyntaxKind.BinaryExpression)
+    descendantsOfKind(sourceFile, SyntaxKind.BinaryExpression)
       .filter(isManualAndGuard).length +
-    sourceFile
-      .getDescendantsOfKind(SyntaxKind.ConditionalExpression)
+    descendantsOfKind(sourceFile, SyntaxKind.ConditionalExpression)
       .filter(isManualTernaryGuard).length;
   const modernOperators =
-    sourceFile.getDescendantsOfKind(SyntaxKind.QuestionDotToken).length +
-    sourceFile.getDescendantsOfKind(SyntaxKind.QuestionQuestionToken).length;
+    descendantsOfKind(sourceFile, SyntaxKind.QuestionDotToken).length +
+    descendantsOfKind(sourceFile, SyntaxKind.QuestionQuestionToken).length;
   const totalNullChecks = manualNullChecks + modernOperators;
   if (totalNullChecks === 0) return null;
   return modernOperators / totalNullChecks;

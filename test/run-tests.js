@@ -1,5 +1,7 @@
 // Minimal regression tests: run the built CLI against fixtures and assert on scores.
-const { execFileSync } = require("child_process");
+const { execFileSync, spawnSync } = require("child_process");
+const fs = require("fs");
+const os = require("os");
 const { basename, join } = require("path");
 const assert = require("assert");
 
@@ -123,5 +125,93 @@ const nestedUnit = byName(fns, "nested-unit.ts").metrics;
 assert.strictEqual(nestedUnit.returnTypes, 1);
 assert.ok(near(nestedUnit.complexity, 0.8), "inner fn scored separately: avg 2");
 assert.ok(near(nestedUnit.nesting, 0.5), "inner fn nesting 2, outer not charged");
+
+// #11: every assertion kind is in the denominator, so the metric stays in [0, 1]
+assert.ok(
+  near(byName(assertions, "non-null.ts").metrics.avoidAssertions, 0.25),
+  "3 non-null assertions among 4 expressions should score 0.25, never negative",
+);
+
+// #12: `else if` chains are flat, a real nested `if` inside one is deeper
+const nesting = score(join(__dirname, "nesting"));
+assert.ok(
+  near(byName(nesting, "else-if.ts").metrics.nesting, 0.75),
+  "an else-if chain is one level deep (0.75), not four",
+);
+assert.ok(
+  near(byName(nesting, "else-if-nested.ts").metrics.nesting, 0.5),
+  "an if nested in an else-if body is two levels deep (0.5)",
+);
+
+// #13: `using` is block scoped, only `var` is flagged
+const vars = score(join(__dirname, "var"));
+assert.strictEqual(byName(vars, "using.ts").metrics.avoidVar, 1);
+assert.strictEqual(byName(vars, "var.ts").metrics.avoidVar, 0);
+
+// #14: the CLI must not crash on bad paths, bad symlinks or very deep trees
+const tmp = fs.mkdtempSync(join(os.tmpdir(), "ts-score-check-"));
+try {
+  const missing = spawnSync(process.execPath, [cli, join(tmp, "nope")], {
+    encoding: "utf8",
+  });
+  assert.strictEqual(missing.status, 1, "missing path must exit with code 1");
+  assert.ok(missing.stderr.includes("path not found"), "clear error message");
+  assert.ok(!missing.stderr.includes("node:fs"), "no raw fs stack trace");
+
+  const links = join(tmp, "links");
+  fs.mkdirSync(links);
+  fs.writeFileSync(join(links, "ok.ts"), "const ok = 1;\n");
+  let symlinksSupported = true;
+  try {
+    fs.symlinkSync("/nonexistent/target.ts", join(links, "broken.ts"));
+    fs.symlinkSync("..", join(links, "loop"));
+  } catch {
+    symlinksSupported = false;
+    console.log("skipping symlink tests: symlinks not supported here");
+  }
+  if (symlinksSupported) {
+    const run = spawnSync(process.execPath, [cli, links, "--json"], {
+      encoding: "utf8",
+    });
+    assert.strictEqual(run.status, 0, `broken symlinks must not fail: ${run.stderr}`);
+    assert.deepStrictEqual(
+      JSON.parse(run.stdout).map((r) => basename(r.file)),
+      ["ok.ts"],
+    );
+    assert.ok(run.stderr.includes("skipped"), "broken symlink is reported");
+  }
+
+  const deep = join(tmp, "deep");
+  fs.mkdirSync(deep);
+  const terms = Array.from({ length: 20000 }, (_, i) => `"s${i}"`).join(" + ");
+  fs.writeFileSync(join(deep, "chain.ts"), `function f(): string {\n  return ${terms};\n}\n`);
+  const chain = spawnSync(process.execPath, [cli, deep, "--json"], {
+    encoding: "utf8",
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  assert.strictEqual(chain.status, 0, `deep chain must not crash: ${chain.stderr.slice(0, 200)}`);
+  assert.ok(
+    JSON.parse(chain.stdout)[0].score !== null,
+    "deep expression chain must still be scored",
+  );
+} finally {
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// #15: preferConst must scale (was quadratic: 4,000 lets took ~42s)
+const lotsDir = fs.mkdtempSync(join(os.tmpdir(), "ts-score-check-lets-"));
+try {
+  const lines = [];
+  for (let i = 0; i < 4000; i++) lines.push(`let v${i} = ${i};`);
+  for (let i = 0; i < 4000; i += 2) lines.push(`v${i}++;`);
+  fs.writeFileSync(join(lotsDir, "lets.ts"), lines.join("\n") + "\n");
+  const started = Date.now();
+  const lots = score(lotsDir)[0];
+  const seconds = (Date.now() - started) / 1000;
+  assert.ok(near(lots.metrics.preferConst, 0.5), "half of the lets are reassigned");
+  assert.ok(seconds < 15, `4,000 lets should score quickly, took ${seconds}s`);
+} finally {
+  fs.rmSync(lotsDir, { recursive: true, force: true });
+}
 
 console.log("All tests passed");

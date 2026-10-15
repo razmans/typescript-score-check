@@ -240,13 +240,17 @@ export function calculatePreferConst(sourceFile: SourceFile): number {
 }
 
 export function calculateAvoidAssertions(sourceFile: SourceFile): number {
+  const asNodes = sourceFile.getDescendantsOfKind(SyntaxKind.AsExpression);
+  // `as const` is a safe literal narrowing, not an unsafe type assertion
+  const asAssertions = asNodes.filter(
+    (n) => n.getTypeNode()?.getText() !== "const",
+  ).length;
   const assertions =
     sourceFile.getDescendantsOfKind(SyntaxKind.TypeAssertionExpression).length +
-    sourceFile.getDescendantsOfKind(SyntaxKind.NonNullExpression).length;
+    sourceFile.getDescendantsOfKind(SyntaxKind.NonNullExpression).length +
+    asAssertions;
   // Use a sum of common expression kinds as a proxy for total expressions
-  const asExpressions = sourceFile.getDescendantsOfKind(
-    SyntaxKind.AsExpression,
-  ).length;
+  const asExpressions = asNodes.length;
   const callExpressions = sourceFile.getDescendantsOfKind(
     SyntaxKind.CallExpression,
   ).length;

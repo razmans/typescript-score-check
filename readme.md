@@ -62,6 +62,8 @@ For each file, you get:
 ### Metric details
 - **avoidAny**: `1 - any / type nodes` (keyword types, type references and literal types).
 - **returnTypes / complexity / nesting**: scored per function: declarations, methods, constructors, accessors, and arrow/function expressions assigned to a name. Inline callbacks count toward their enclosing function. Return types are not required on constructors, setters, inline callbacks or functions typed by their variable annotation.
+- **accessModifiers**: class members with an explicit `public`/`private`/`protected` (or a `#private` name). `static`, `async`, `readonly`, `override` do not count. Constructors, static blocks and index signatures are not counted as members.
+- **useReadonly**: `readonly` properties / properties that could be readonly. A property reassigned outside the constructor (assignment, compound assignment, `++`/`--`, destructuring) can't be readonly and is left out. Matching is by property name, so it errs lenient.
 - **preferConst**: a `let` is only penalised if it is never reassigned (assignment, `++`/`--`, destructuring assignment) and has an initializer. `for (let x of ...)` is penalised.
 - **avoidAssertions**: counts `x as T`, `<T>x` and `x!` (`as const` is allowed).
 - **optionalChaining**: manual null checks (`x && x.y`, `x != null ? x.y : d`) vs `?.` and `??`. Plain boolean `&&` is ignored.

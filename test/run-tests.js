@@ -130,4 +130,15 @@ assert.ok(
   "3 non-null assertions among 4 expressions should score 0.25, never negative",
 );
 
+// #12: `else if` chains are flat, a real nested `if` inside one is deeper
+const nesting = score(join(__dirname, "nesting"));
+assert.ok(
+  near(byName(nesting, "else-if.ts").metrics.nesting, 0.75),
+  "an else-if chain is one level deep (0.75), not four",
+);
+assert.ok(
+  near(byName(nesting, "else-if-nested.ts").metrics.nesting, 0.5),
+  "an if nested in an else-if body is two levels deep (0.5)",
+);
+
 console.log("All tests passed");

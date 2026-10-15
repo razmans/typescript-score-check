@@ -338,12 +338,23 @@ const NESTING_KINDS: ReadonlySet<SyntaxKind> = new Set([
   SyntaxKind.DoStatement,
 ]);
 
+// `else if` is flat control flow, not a deeper level of nesting
+function isElseIf(node: Node, parent: Node): boolean {
+  return (
+    Node.isIfStatement(node) &&
+    Node.isIfStatement(parent) &&
+    parent.getElseStatement() === node
+  );
+}
+
 function getNesting(node: Node, current = 0): number {
   let localMax = current;
   node.forEachChild((child: Node) => {
     // nested units are scored on their own
     if (isFunctionLike(child) && isFunctionUnit(child)) return;
-    const depth = NESTING_KINDS.has(child.getKind()) ? current + 1 : current;
+    const increases =
+      NESTING_KINDS.has(child.getKind()) && !isElseIf(child, node);
+    const depth = increases ? current + 1 : current;
     localMax = Math.max(localMax, getNesting(child, depth));
   });
   return localMax;

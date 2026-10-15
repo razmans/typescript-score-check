@@ -272,13 +272,20 @@ const NESTING_KINDS = new Set([
     ts_morph_1.SyntaxKind.WhileStatement,
     ts_morph_1.SyntaxKind.DoStatement,
 ]);
+// `else if` is flat control flow, not a deeper level of nesting
+function isElseIf(node, parent) {
+    return (ts_morph_1.Node.isIfStatement(node) &&
+        ts_morph_1.Node.isIfStatement(parent) &&
+        parent.getElseStatement() === node);
+}
 function getNesting(node, current = 0) {
     let localMax = current;
     node.forEachChild((child) => {
         // nested units are scored on their own
         if (isFunctionLike(child) && isFunctionUnit(child))
             return;
-        const depth = NESTING_KINDS.has(child.getKind()) ? current + 1 : current;
+        const increases = NESTING_KINDS.has(child.getKind()) && !isElseIf(child, node);
+        const depth = increases ? current + 1 : current;
         localMax = Math.max(localMax, getNesting(child, depth));
     });
     return localMax;

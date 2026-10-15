@@ -56,4 +56,26 @@ assert.ok(
 assert.strictEqual(byName(anyResults, "only-any.ts").metrics.avoidAny, 0);
 assert.strictEqual(byName(anyResults, "no-any.ts").metrics.avoidAny, 1);
 
+// #6: only real manual null checks count; plain boolean && does not
+const chaining = score(join(__dirname, "chaining"));
+assert.ok(
+  near(byName(chaining, "mixed.ts").metrics.optionalChaining, 0.5),
+  "2 manual + 2 modern null checks should score 0.5",
+);
+assert.strictEqual(
+  byName(chaining, "chained.ts").metrics.optionalChaining,
+  0,
+  "`a && a.b && a.b.c` is two manual checks",
+);
+assert.strictEqual(
+  byName(chaining, "negated.ts").metrics.optionalChaining,
+  0,
+  "`x == null ? d : x.y` is a manual check",
+);
+assert.strictEqual(
+  byName(chaining, "boolean-only.ts").metrics.optionalChaining,
+  null,
+  "plain boolean && is not a null check",
+);
+
 console.log("All tests passed");

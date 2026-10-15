@@ -8,6 +8,8 @@ import {
   Node,
   ClassDeclaration,
   ClassMemberTypes,
+  BinaryExpression,
+  ConditionalExpression,
   FunctionDeclaration,
   VariableDeclaration,
 } from "ts-morph";
@@ -331,31 +333,135 @@ export function calculateAvoidVar(sourceFile: SourceFile): MetricValue {
     : 1;
 }
 
+function stripWrappers(node: Node): Node {
+  let current = node;
+  while (
+    Node.isParenthesizedExpression(current) ||
+    Node.isNonNullExpression(current)
+  ) {
+    current = current.getExpression();
+  }
+  return current;
+}
+
+function normalisedText(node: Node): string {
+  return stripWrappers(node).getText().replace(/\s+/g, "");
+}
+
+// Receivers along an access chain: for `a.b.c()` this is ["a.b.c", "a.b", "a"].
+// A null check on any of these could be replaced by `?.`.
+function accessChainReceivers(node: Node): string[] {
+  const receivers: string[] = [];
+  let current = stripWrappers(node);
+  while (
+    Node.isPropertyAccessExpression(current) ||
+    Node.isElementAccessExpression(current) ||
+    Node.isCallExpression(current)
+  ) {
+    current = stripWrappers(current.getExpression());
+    receivers.push(normalisedText(current));
+  }
+  return receivers;
+}
+
+function isNullish(node: Node): boolean {
+  const n = stripWrappers(node);
+  return (
+    Node.isNullLiteral(n) || (Node.isIdentifier(n) && n.getText() === "undefined")
+  );
+}
+
+interface NullGuard {
+  target: string;
+  // true: guard holds when `target` is present (x, x != null, !!x)
+  // false: guard holds when `target` is absent (!x, x == null)
+  presentWhenTrue: boolean;
+}
+
+// Recognise `x`, `!!x`, `!x`, `x != null`, `x !== undefined`, `x == null`, ...
+function parseNullGuard(node: Node): NullGuard | undefined {
+  const n = stripWrappers(node);
+  if (Node.isPrefixUnaryExpression(n)) {
+    if (n.getOperatorToken() !== SyntaxKind.ExclamationToken) return undefined;
+    const operand = stripWrappers(n.getOperand());
+    if (
+      Node.isPrefixUnaryExpression(operand) &&
+      operand.getOperatorToken() === SyntaxKind.ExclamationToken
+    ) {
+      return {
+        target: normalisedText(operand.getOperand()),
+        presentWhenTrue: true,
+      };
+    }
+    return { target: normalisedText(operand), presentWhenTrue: false };
+  }
+  if (Node.isBinaryExpression(n)) {
+    const operator = n.getOperatorToken().getText();
+    const isNotEqual = operator === "!=" || operator === "!==";
+    const isEqual = operator === "==" || operator === "===";
+    if (!isNotEqual && !isEqual) return undefined;
+    const left = n.getLeft();
+    const right = n.getRight();
+    if (isNullish(right)) {
+      return { target: normalisedText(left), presentWhenTrue: isNotEqual };
+    }
+    if (isNullish(left)) {
+      return { target: normalisedText(right), presentWhenTrue: isNotEqual };
+    }
+    return undefined;
+  }
+  if (
+    Node.isIdentifier(n) ||
+    Node.isPropertyAccessExpression(n) ||
+    Node.isElementAccessExpression(n)
+  ) {
+    return { target: normalisedText(n), presentWhenTrue: true };
+  }
+  return undefined;
+}
+
+function isAndExpression(node: Node): node is BinaryExpression {
+  return (
+    Node.isBinaryExpression(node) &&
+    node.getOperatorToken().getKind() === SyntaxKind.AmpersandAmpersandToken
+  );
+}
+
+// `x && x.y`, `x && x.y.z()`, `a && a.b && a.b.c`
+function isManualAndGuard(expr: BinaryExpression): boolean {
+  let guardNode: Node = stripWrappers(expr.getLeft());
+  while (isAndExpression(guardNode)) {
+    guardNode = stripWrappers(guardNode.getRight());
+  }
+  const guard = parseNullGuard(guardNode);
+  if (!guard || !guard.presentWhenTrue) return false;
+  return accessChainReceivers(expr.getRight()).includes(guard.target);
+}
+
+// `x ? x.y : d`, `x != null ? x.y : d`, `x == null ? d : x.y`
+function isManualTernaryGuard(expr: ConditionalExpression): boolean {
+  const guard = parseNullGuard(expr.getCondition());
+  if (!guard) return false;
+  const guarded = guard.presentWhenTrue ? expr.getWhenTrue() : expr.getWhenFalse();
+  return accessChainReceivers(guarded).includes(guard.target);
+}
+
 export function calculateOptionalChaining(sourceFile: SourceFile): MetricValue {
-  // Improved: Check for patterns like x && x.y (manual) vs x?.y (modern)
-  let manualNullChecks = 0;
-  let modernOperators = 0;
-  sourceFile
-    .getDescendantsOfKind(SyntaxKind.BinaryExpression)
-    .forEach((e: Node) => {
-      if (
-        typeof (e as any).getOperatorToken === "function" &&
-        (e as any).getOperatorToken().getKind() ===
-          SyntaxKind.AmpersandAmpersandToken
-      ) {
-        manualNullChecks++;
-      }
-    });
-  modernOperators += sourceFile.getDescendantsOfKind(
-    SyntaxKind.QuestionDotToken,
-  ).length;
-  modernOperators += sourceFile.getDescendantsOfKind(
-    SyntaxKind.QuestionQuestionToken,
-  ).length;
+  // Manual null-check patterns (`x && x.y`, `x ? x.y : d`) vs modern operators
+  // (`?.`, `??`). Plain boolean logic such as `a > 1 && b < 2` is not counted.
+  const manualNullChecks =
+    sourceFile
+      .getDescendantsOfKind(SyntaxKind.BinaryExpression)
+      .filter(isManualAndGuard).length +
+    sourceFile
+      .getDescendantsOfKind(SyntaxKind.ConditionalExpression)
+      .filter(isManualTernaryGuard).length;
+  const modernOperators =
+    sourceFile.getDescendantsOfKind(SyntaxKind.QuestionDotToken).length +
+    sourceFile.getDescendantsOfKind(SyntaxKind.QuestionQuestionToken).length;
   const totalNullChecks = manualNullChecks + modernOperators;
   if (totalNullChecks === 0) return null;
   return modernOperators / totalNullChecks;
-  // Removed stray closing brace at end of file
 }
 
 export function calculateScore(metrics: ScoreMetrics): number | null {

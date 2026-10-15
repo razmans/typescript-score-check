@@ -259,26 +259,111 @@ function calculateAvoidVar(sourceFile) {
         ? 0
         : 1;
 }
-function calculateOptionalChaining(sourceFile) {
-    // Improved: Check for patterns like x && x.y (manual) vs x?.y (modern)
-    let manualNullChecks = 0;
-    let modernOperators = 0;
-    sourceFile
-        .getDescendantsOfKind(ts_morph_1.SyntaxKind.BinaryExpression)
-        .forEach((e) => {
-        if (typeof e.getOperatorToken === "function" &&
-            e.getOperatorToken().getKind() ===
-                ts_morph_1.SyntaxKind.AmpersandAmpersandToken) {
-            manualNullChecks++;
+function stripWrappers(node) {
+    let current = node;
+    while (ts_morph_1.Node.isParenthesizedExpression(current) ||
+        ts_morph_1.Node.isNonNullExpression(current)) {
+        current = current.getExpression();
+    }
+    return current;
+}
+function normalisedText(node) {
+    return stripWrappers(node).getText().replace(/\s+/g, "");
+}
+// Receivers along an access chain: for `a.b.c()` this is ["a.b.c", "a.b", "a"].
+// A null check on any of these could be replaced by `?.`.
+function accessChainReceivers(node) {
+    const receivers = [];
+    let current = stripWrappers(node);
+    while (ts_morph_1.Node.isPropertyAccessExpression(current) ||
+        ts_morph_1.Node.isElementAccessExpression(current) ||
+        ts_morph_1.Node.isCallExpression(current)) {
+        current = stripWrappers(current.getExpression());
+        receivers.push(normalisedText(current));
+    }
+    return receivers;
+}
+function isNullish(node) {
+    const n = stripWrappers(node);
+    return (ts_morph_1.Node.isNullLiteral(n) || (ts_morph_1.Node.isIdentifier(n) && n.getText() === "undefined"));
+}
+// Recognise `x`, `!!x`, `!x`, `x != null`, `x !== undefined`, `x == null`, ...
+function parseNullGuard(node) {
+    const n = stripWrappers(node);
+    if (ts_morph_1.Node.isPrefixUnaryExpression(n)) {
+        if (n.getOperatorToken() !== ts_morph_1.SyntaxKind.ExclamationToken)
+            return undefined;
+        const operand = stripWrappers(n.getOperand());
+        if (ts_morph_1.Node.isPrefixUnaryExpression(operand) &&
+            operand.getOperatorToken() === ts_morph_1.SyntaxKind.ExclamationToken) {
+            return {
+                target: normalisedText(operand.getOperand()),
+                presentWhenTrue: true,
+            };
         }
-    });
-    modernOperators += sourceFile.getDescendantsOfKind(ts_morph_1.SyntaxKind.QuestionDotToken).length;
-    modernOperators += sourceFile.getDescendantsOfKind(ts_morph_1.SyntaxKind.QuestionQuestionToken).length;
+        return { target: normalisedText(operand), presentWhenTrue: false };
+    }
+    if (ts_morph_1.Node.isBinaryExpression(n)) {
+        const operator = n.getOperatorToken().getText();
+        const isNotEqual = operator === "!=" || operator === "!==";
+        const isEqual = operator === "==" || operator === "===";
+        if (!isNotEqual && !isEqual)
+            return undefined;
+        const left = n.getLeft();
+        const right = n.getRight();
+        if (isNullish(right)) {
+            return { target: normalisedText(left), presentWhenTrue: isNotEqual };
+        }
+        if (isNullish(left)) {
+            return { target: normalisedText(right), presentWhenTrue: isNotEqual };
+        }
+        return undefined;
+    }
+    if (ts_morph_1.Node.isIdentifier(n) ||
+        ts_morph_1.Node.isPropertyAccessExpression(n) ||
+        ts_morph_1.Node.isElementAccessExpression(n)) {
+        return { target: normalisedText(n), presentWhenTrue: true };
+    }
+    return undefined;
+}
+function isAndExpression(node) {
+    return (ts_morph_1.Node.isBinaryExpression(node) &&
+        node.getOperatorToken().getKind() === ts_morph_1.SyntaxKind.AmpersandAmpersandToken);
+}
+// `x && x.y`, `x && x.y.z()`, `a && a.b && a.b.c`
+function isManualAndGuard(expr) {
+    let guardNode = stripWrappers(expr.getLeft());
+    while (isAndExpression(guardNode)) {
+        guardNode = stripWrappers(guardNode.getRight());
+    }
+    const guard = parseNullGuard(guardNode);
+    if (!guard || !guard.presentWhenTrue)
+        return false;
+    return accessChainReceivers(expr.getRight()).includes(guard.target);
+}
+// `x ? x.y : d`, `x != null ? x.y : d`, `x == null ? d : x.y`
+function isManualTernaryGuard(expr) {
+    const guard = parseNullGuard(expr.getCondition());
+    if (!guard)
+        return false;
+    const guarded = guard.presentWhenTrue ? expr.getWhenTrue() : expr.getWhenFalse();
+    return accessChainReceivers(guarded).includes(guard.target);
+}
+function calculateOptionalChaining(sourceFile) {
+    // Manual null-check patterns (`x && x.y`, `x ? x.y : d`) vs modern operators
+    // (`?.`, `??`). Plain boolean logic such as `a > 1 && b < 2` is not counted.
+    const manualNullChecks = sourceFile
+        .getDescendantsOfKind(ts_morph_1.SyntaxKind.BinaryExpression)
+        .filter(isManualAndGuard).length +
+        sourceFile
+            .getDescendantsOfKind(ts_morph_1.SyntaxKind.ConditionalExpression)
+            .filter(isManualTernaryGuard).length;
+    const modernOperators = sourceFile.getDescendantsOfKind(ts_morph_1.SyntaxKind.QuestionDotToken).length +
+        sourceFile.getDescendantsOfKind(ts_morph_1.SyntaxKind.QuestionQuestionToken).length;
     const totalNullChecks = manualNullChecks + modernOperators;
     if (totalNullChecks === 0)
         return null;
     return modernOperators / totalNullChecks;
-    // Removed stray closing brace at end of file
 }
 function calculateScore(metrics) {
     // Only metrics that have a defined weight and applied to this file count;

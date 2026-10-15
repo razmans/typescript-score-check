@@ -1,0 +1,3 @@
+const a: any = 1;
+const b: string = "x";
+const c: number = 2;

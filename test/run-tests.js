@@ -46,4 +46,14 @@ for (const [name, value] of Object.entries(empty.metrics)) {
 assert.strictEqual(good.metrics.accessModifiers, null);
 assert.strictEqual(good.metrics.useReadonly, null);
 
+// #7: avoidAny = 1 - any / all atomic type nodes (primitives count too)
+const anyResults = score(join(__dirname, "any"));
+const near = (a, b) => Math.abs(a - b) < 1e-9;
+assert.ok(
+  near(byName(anyResults, "one-in-three.ts").metrics.avoidAny, 2 / 3),
+  "1 any among 3 types should score 2/3",
+);
+assert.strictEqual(byName(anyResults, "only-any.ts").metrics.avoidAny, 0);
+assert.strictEqual(byName(anyResults, "no-any.ts").metrics.avoidAny, 1);
+
 console.log("All tests passed");

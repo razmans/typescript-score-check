@@ -117,17 +117,43 @@ export const weights: Record<string, number> = {
   optionalChaining: 10,
 };
 
+// Atomic type nodes: the leaves of a type annotation (keyword types, named type
+// references and literal types). Used as a stable denominator for avoidAny so
+// the score is the share of type positions that are `any`.
+const ATOMIC_TYPE_KINDS: ReadonlySet<SyntaxKind> = new Set([
+  SyntaxKind.AnyKeyword,
+  SyntaxKind.UnknownKeyword,
+  SyntaxKind.StringKeyword,
+  SyntaxKind.NumberKeyword,
+  SyntaxKind.BooleanKeyword,
+  SyntaxKind.BigIntKeyword,
+  SyntaxKind.SymbolKeyword,
+  SyntaxKind.ObjectKeyword,
+  SyntaxKind.VoidKeyword,
+  SyntaxKind.NeverKeyword,
+  SyntaxKind.UndefinedKeyword,
+  SyntaxKind.TypeReference,
+  SyntaxKind.LiteralType,
+]);
+
 export function calculateAvoidAny(sourceFile: SourceFile): MetricValue {
-  const anyCount = sourceFile.getDescendantsOfKind(
-    SyntaxKind.AnyKeyword,
-  ).length;
-  const typeRefCount = sourceFile.getDescendantsOfKind(
-    SyntaxKind.TypeReference,
-  ).length;
-  // Use total type nodes as denominator, fallback to total nodes if 0
-  const denominator = typeRefCount > 0 ? typeRefCount : anyCount;
-  if (denominator === 0) return null;
-  return 1 - anyCount / denominator;
+  let anyCount = 0;
+  let atomicTypeCount = 0;
+  for (const node of sourceFile.getDescendants()) {
+    const kind = node.getKind();
+    if (!ATOMIC_TYPE_KINDS.has(kind)) continue;
+    // `void expr` also contains a VoidKeyword token; it is not a type
+    if (
+      kind === SyntaxKind.VoidKeyword &&
+      node.getParent()?.getKind() === SyntaxKind.VoidExpression
+    ) {
+      continue;
+    }
+    atomicTypeCount++;
+    if (kind === SyntaxKind.AnyKeyword) anyCount++;
+  }
+  if (atomicTypeCount === 0) return null;
+  return 1 - anyCount / atomicTypeCount;
 }
 
 export function calculateReturnTypes(sourceFile: SourceFile): MetricValue {

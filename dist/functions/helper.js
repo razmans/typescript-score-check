@@ -85,14 +85,43 @@ exports.weights = {
     avoidVar: 10,
     optionalChaining: 10,
 };
+// Atomic type nodes: the leaves of a type annotation (keyword types, named type
+// references and literal types). Used as a stable denominator for avoidAny so
+// the score is the share of type positions that are `any`.
+const ATOMIC_TYPE_KINDS = new Set([
+    ts_morph_1.SyntaxKind.AnyKeyword,
+    ts_morph_1.SyntaxKind.UnknownKeyword,
+    ts_morph_1.SyntaxKind.StringKeyword,
+    ts_morph_1.SyntaxKind.NumberKeyword,
+    ts_morph_1.SyntaxKind.BooleanKeyword,
+    ts_morph_1.SyntaxKind.BigIntKeyword,
+    ts_morph_1.SyntaxKind.SymbolKeyword,
+    ts_morph_1.SyntaxKind.ObjectKeyword,
+    ts_morph_1.SyntaxKind.VoidKeyword,
+    ts_morph_1.SyntaxKind.NeverKeyword,
+    ts_morph_1.SyntaxKind.UndefinedKeyword,
+    ts_morph_1.SyntaxKind.TypeReference,
+    ts_morph_1.SyntaxKind.LiteralType,
+]);
 function calculateAvoidAny(sourceFile) {
-    const anyCount = sourceFile.getDescendantsOfKind(ts_morph_1.SyntaxKind.AnyKeyword).length;
-    const typeRefCount = sourceFile.getDescendantsOfKind(ts_morph_1.SyntaxKind.TypeReference).length;
-    // Use total type nodes as denominator, fallback to total nodes if 0
-    const denominator = typeRefCount > 0 ? typeRefCount : anyCount;
-    if (denominator === 0)
+    let anyCount = 0;
+    let atomicTypeCount = 0;
+    for (const node of sourceFile.getDescendants()) {
+        const kind = node.getKind();
+        if (!ATOMIC_TYPE_KINDS.has(kind))
+            continue;
+        // `void expr` also contains a VoidKeyword token; it is not a type
+        if (kind === ts_morph_1.SyntaxKind.VoidKeyword &&
+            node.getParent()?.getKind() === ts_morph_1.SyntaxKind.VoidExpression) {
+            continue;
+        }
+        atomicTypeCount++;
+        if (kind === ts_morph_1.SyntaxKind.AnyKeyword)
+            anyCount++;
+    }
+    if (atomicTypeCount === 0)
         return null;
-    return 1 - anyCount / denominator;
+    return 1 - anyCount / atomicTypeCount;
 }
 function calculateReturnTypes(sourceFile) {
     const functions = sourceFile.getFunctions();

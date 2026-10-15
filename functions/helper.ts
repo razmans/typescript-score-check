@@ -11,7 +11,13 @@ import {
   BinaryExpression,
   Identifier,
   ConditionalExpression,
+  ArrowFunction,
+  ConstructorDeclaration,
   FunctionDeclaration,
+  FunctionExpression,
+  GetAccessorDeclaration,
+  MethodDeclaration,
+  SetAccessorDeclaration,
   VariableDeclaration,
 } from "ts-morph";
 import { InterfaceInfo } from "./interface";
@@ -159,11 +165,92 @@ export function calculateAvoidAny(sourceFile: SourceFile): MetricValue {
   return 1 - anyCount / atomicTypeCount;
 }
 
+type FunctionLike =
+  | FunctionDeclaration
+  | MethodDeclaration
+  | ConstructorDeclaration
+  | GetAccessorDeclaration
+  | SetAccessorDeclaration
+  | ArrowFunction
+  | FunctionExpression;
+
+function isFunctionLike(node: Node): node is FunctionLike {
+  return (
+    Node.isFunctionDeclaration(node) ||
+    Node.isMethodDeclaration(node) ||
+    Node.isConstructorDeclaration(node) ||
+    Node.isGetAccessorDeclaration(node) ||
+    Node.isSetAccessorDeclaration(node) ||
+    Node.isArrowFunction(node) ||
+    Node.isFunctionExpression(node)
+  );
+}
+
+// `const f = () => {}`, `{ f: () => {} }`, `class A { f = () => {} }`, `x = () => {}`
+function isAssignedFunction(fn: FunctionLike): boolean {
+  let child: Node = fn;
+  let parent = fn.getParent();
+  while (parent && Node.isParenthesizedExpression(parent)) {
+    child = parent;
+    parent = parent.getParent();
+  }
+  if (!parent) return false;
+  if (
+    Node.isVariableDeclaration(parent) ||
+    Node.isPropertyDeclaration(parent) ||
+    Node.isPropertyAssignment(parent)
+  ) {
+    return parent.getInitializer() === child;
+  }
+  return (
+    Node.isBinaryExpression(parent) &&
+    parent.getOperatorToken().getText() === "=" &&
+    parent.getRight() === child
+  );
+}
+
+// A unit is a function that is scored on its own: declarations, methods,
+// constructors, accessors and functions assigned to a name. Inline callbacks
+// (`arr.map(x => ...)`) belong to the enclosing unit; a callback with no
+// enclosing function is its own unit.
+function isFunctionUnit(fn: FunctionLike): boolean {
+  if (!fn.getBody()) return false; // overload signatures, abstract methods
+  if (!Node.isArrowFunction(fn) && !Node.isFunctionExpression(fn)) return true;
+  if (isAssignedFunction(fn)) return true;
+  return !fn.getFirstAncestor(isFunctionLike);
+}
+
+function getFunctionUnits(sourceFile: SourceFile): FunctionLike[] {
+  return sourceFile
+    .getDescendants()
+    .filter(isFunctionLike)
+    .filter(isFunctionUnit);
+}
+
+// Explicit return types are expected on declarations, methods and getters, and
+// on functions assigned to an untyped name. Constructors, setters, inline
+// callbacks and contextually typed functions are exempt.
+function requiresReturnType(fn: FunctionLike): boolean {
+  if (Node.isConstructorDeclaration(fn) || Node.isSetAccessorDeclaration(fn)) {
+    return false;
+  }
+  if (!Node.isArrowFunction(fn) && !Node.isFunctionExpression(fn)) return true;
+  if (!isAssignedFunction(fn)) return false;
+  const parent = fn.getParent();
+  const owner = Node.isParenthesizedExpression(parent)
+    ? parent.getParent()
+    : parent;
+  const isContextuallyTyped =
+    (Node.isVariableDeclaration(owner) || Node.isPropertyDeclaration(owner)) &&
+    owner.getTypeNode() !== undefined;
+  return !isContextuallyTyped;
+}
+
 export function calculateReturnTypes(sourceFile: SourceFile): MetricValue {
-  const functions = sourceFile.getFunctions();
+  const functions = getFunctionUnits(sourceFile).filter(requiresReturnType);
   if (functions.length === 0) return null;
-  const withReturn = functions.filter((f: FunctionDeclaration) =>
-    f.getReturnTypeNode(),
+  const withReturn = functions.filter(
+    (f) => Node.isReturnTyped(f) && f.getReturnTypeNode() !== undefined,
   ).length;
   return withReturn / functions.length;
 }
@@ -188,76 +275,84 @@ export function calculateAccessModifiers(sourceFile: SourceFile): MetricValue {
   return members === 0 ? null : withModifiers / members;
 }
 
-export function calculateComplexity(sourceFile: SourceFile): MetricValue {
-  const functions = sourceFile.getFunctions();
-  if (functions.length === 0) return null;
-  let totalComplexity = 0;
-  functions.forEach((f: FunctionDeclaration) => {
-    let complexity = 1;
-    complexity += f.getDescendantsOfKind(SyntaxKind.IfStatement).length;
-    complexity += f.getDescendantsOfKind(SyntaxKind.SwitchStatement).length;
-    complexity += f.getDescendantsOfKind(SyntaxKind.ForStatement).length;
-    complexity += f.getDescendantsOfKind(SyntaxKind.ForInStatement).length;
-    complexity += f.getDescendantsOfKind(SyntaxKind.ForOfStatement).length;
-    complexity += f.getDescendantsOfKind(SyntaxKind.WhileStatement).length;
-    complexity += f.getDescendantsOfKind(SyntaxKind.DoStatement).length;
-    complexity += f.getDescendantsOfKind(SyntaxKind.TryStatement).length;
-    complexity += f.getDescendantsOfKind(SyntaxKind.CatchClause).length;
-    complexity += f.getDescendantsOfKind(
-      SyntaxKind.ConditionalExpression,
-    ).length;
-    complexity += f
-      .getDescendantsOfKind(SyntaxKind.BinaryExpression)
-      .filter(
-        (expr: Node) =>
-          typeof (expr as any).getOperatorToken === "function" &&
-          (expr as any).getOperatorToken().getKind() ===
-            SyntaxKind.AmpersandAmpersandToken,
-      ).length;
-    complexity += f
-      .getDescendantsOfKind(SyntaxKind.BinaryExpression)
-      .filter(
-        (expr: Node) =>
-          typeof (expr as any).getOperatorToken === "function" &&
-          (expr as any).getOperatorToken().getKind() === SyntaxKind.BarBarToken,
-      ).length;
-    totalComplexity += complexity;
+// Descendants of a unit, excluding the bodies of nested units (those are
+// scored on their own). Inline callbacks are included.
+function getOwnDescendants(unit: FunctionLike): Node[] {
+  const nodes: Node[] = [];
+  unit.forEachDescendant((node, traversal) => {
+    if (isFunctionLike(node) && isFunctionUnit(node)) {
+      traversal.skip();
+      return;
+    }
+    nodes.push(node);
   });
-  const avgComplexity = totalComplexity / functions.length;
+  return nodes;
+}
+
+const DECISION_KINDS: ReadonlySet<SyntaxKind> = new Set([
+  SyntaxKind.IfStatement,
+  SyntaxKind.SwitchStatement,
+  SyntaxKind.ForStatement,
+  SyntaxKind.ForInStatement,
+  SyntaxKind.ForOfStatement,
+  SyntaxKind.WhileStatement,
+  SyntaxKind.DoStatement,
+  SyntaxKind.TryStatement,
+  SyntaxKind.CatchClause,
+  SyntaxKind.ConditionalExpression,
+]);
+
+function isLogicalAndOr(node: Node): boolean {
+  if (!Node.isBinaryExpression(node)) return false;
+  const operator = node.getOperatorToken().getKind();
+  return (
+    operator === SyntaxKind.AmpersandAmpersandToken ||
+    operator === SyntaxKind.BarBarToken
+  );
+}
+
+export function calculateComplexity(sourceFile: SourceFile): MetricValue {
+  const units = getFunctionUnits(sourceFile);
+  if (units.length === 0) return null;
+  let totalComplexity = 0;
+  for (const unit of units) {
+    let complexity = 1;
+    for (const node of getOwnDescendants(unit)) {
+      if (DECISION_KINDS.has(node.getKind()) || isLogicalAndOr(node)) {
+        complexity++;
+      }
+    }
+    totalComplexity += complexity;
+  }
+  const avgComplexity = totalComplexity / units.length;
   return Math.max(0, 1 - (avgComplexity - 1) / 5); // Lowered threshold to 6 for more sensitivity
 }
 
-export function calculateNesting(sourceFile: SourceFile): MetricValue {
-  const functions = sourceFile.getFunctions();
-  if (functions.length === 0) return null;
-  let maxNesting = 0;
+const NESTING_KINDS: ReadonlySet<SyntaxKind> = new Set([
+  SyntaxKind.IfStatement,
+  SyntaxKind.SwitchStatement,
+  SyntaxKind.ForStatement,
+  SyntaxKind.ForInStatement,
+  SyntaxKind.ForOfStatement,
+  SyntaxKind.WhileStatement,
+  SyntaxKind.DoStatement,
+]);
 
-  function getNesting(node: Node, current = 0): number {
-    let localMax = current;
-    node.forEachChild((child: Node) => {
-      if (
-        [
-          SyntaxKind.IfStatement,
-          SyntaxKind.SwitchStatement,
-          SyntaxKind.ForStatement,
-          SyntaxKind.ForInStatement,
-          SyntaxKind.ForOfStatement,
-          SyntaxKind.WhileStatement,
-          SyntaxKind.DoStatement,
-        ].includes(child.getKind())
-      ) {
-        localMax = Math.max(localMax, getNesting(child, current + 1));
-      } else {
-        localMax = Math.max(localMax, getNesting(child, current));
-      }
-    });
-    return localMax;
-  }
-
-  functions.forEach((f: FunctionDeclaration) => {
-    maxNesting = Math.max(maxNesting, getNesting(f));
+function getNesting(node: Node, current = 0): number {
+  let localMax = current;
+  node.forEachChild((child: Node) => {
+    // nested units are scored on their own
+    if (isFunctionLike(child) && isFunctionUnit(child)) return;
+    const depth = NESTING_KINDS.has(child.getKind()) ? current + 1 : current;
+    localMax = Math.max(localMax, getNesting(child, depth));
   });
+  return localMax;
+}
 
+export function calculateNesting(sourceFile: SourceFile): MetricValue {
+  const units = getFunctionUnits(sourceFile);
+  if (units.length === 0) return null;
+  const maxNesting = Math.max(...units.map((unit) => getNesting(unit)));
   return Math.max(0, 1 - maxNesting / 4);
 }
 

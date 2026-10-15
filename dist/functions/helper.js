@@ -123,11 +123,77 @@ function calculateAvoidAny(sourceFile) {
         return null;
     return 1 - anyCount / atomicTypeCount;
 }
+function isFunctionLike(node) {
+    return (ts_morph_1.Node.isFunctionDeclaration(node) ||
+        ts_morph_1.Node.isMethodDeclaration(node) ||
+        ts_morph_1.Node.isConstructorDeclaration(node) ||
+        ts_morph_1.Node.isGetAccessorDeclaration(node) ||
+        ts_morph_1.Node.isSetAccessorDeclaration(node) ||
+        ts_morph_1.Node.isArrowFunction(node) ||
+        ts_morph_1.Node.isFunctionExpression(node));
+}
+// `const f = () => {}`, `{ f: () => {} }`, `class A { f = () => {} }`, `x = () => {}`
+function isAssignedFunction(fn) {
+    let child = fn;
+    let parent = fn.getParent();
+    while (parent && ts_morph_1.Node.isParenthesizedExpression(parent)) {
+        child = parent;
+        parent = parent.getParent();
+    }
+    if (!parent)
+        return false;
+    if (ts_morph_1.Node.isVariableDeclaration(parent) ||
+        ts_morph_1.Node.isPropertyDeclaration(parent) ||
+        ts_morph_1.Node.isPropertyAssignment(parent)) {
+        return parent.getInitializer() === child;
+    }
+    return (ts_morph_1.Node.isBinaryExpression(parent) &&
+        parent.getOperatorToken().getText() === "=" &&
+        parent.getRight() === child);
+}
+// A unit is a function that is scored on its own: declarations, methods,
+// constructors, accessors and functions assigned to a name. Inline callbacks
+// (`arr.map(x => ...)`) belong to the enclosing unit; a callback with no
+// enclosing function is its own unit.
+function isFunctionUnit(fn) {
+    if (!fn.getBody())
+        return false; // overload signatures, abstract methods
+    if (!ts_morph_1.Node.isArrowFunction(fn) && !ts_morph_1.Node.isFunctionExpression(fn))
+        return true;
+    if (isAssignedFunction(fn))
+        return true;
+    return !fn.getFirstAncestor(isFunctionLike);
+}
+function getFunctionUnits(sourceFile) {
+    return sourceFile
+        .getDescendants()
+        .filter(isFunctionLike)
+        .filter(isFunctionUnit);
+}
+// Explicit return types are expected on declarations, methods and getters, and
+// on functions assigned to an untyped name. Constructors, setters, inline
+// callbacks and contextually typed functions are exempt.
+function requiresReturnType(fn) {
+    if (ts_morph_1.Node.isConstructorDeclaration(fn) || ts_morph_1.Node.isSetAccessorDeclaration(fn)) {
+        return false;
+    }
+    if (!ts_morph_1.Node.isArrowFunction(fn) && !ts_morph_1.Node.isFunctionExpression(fn))
+        return true;
+    if (!isAssignedFunction(fn))
+        return false;
+    const parent = fn.getParent();
+    const owner = ts_morph_1.Node.isParenthesizedExpression(parent)
+        ? parent.getParent()
+        : parent;
+    const isContextuallyTyped = (ts_morph_1.Node.isVariableDeclaration(owner) || ts_morph_1.Node.isPropertyDeclaration(owner)) &&
+        owner.getTypeNode() !== undefined;
+    return !isContextuallyTyped;
+}
 function calculateReturnTypes(sourceFile) {
-    const functions = sourceFile.getFunctions();
+    const functions = getFunctionUnits(sourceFile).filter(requiresReturnType);
     if (functions.length === 0)
         return null;
-    const withReturn = functions.filter((f) => f.getReturnTypeNode()).length;
+    const withReturn = functions.filter((f) => ts_morph_1.Node.isReturnTyped(f) && f.getReturnTypeNode() !== undefined).length;
     return withReturn / functions.length;
 }
 function calculateAccessModifiers(sourceFile) {
@@ -148,65 +214,80 @@ function calculateAccessModifiers(sourceFile) {
     });
     return members === 0 ? null : withModifiers / members;
 }
+// Descendants of a unit, excluding the bodies of nested units (those are
+// scored on their own). Inline callbacks are included.
+function getOwnDescendants(unit) {
+    const nodes = [];
+    unit.forEachDescendant((node, traversal) => {
+        if (isFunctionLike(node) && isFunctionUnit(node)) {
+            traversal.skip();
+            return;
+        }
+        nodes.push(node);
+    });
+    return nodes;
+}
+const DECISION_KINDS = new Set([
+    ts_morph_1.SyntaxKind.IfStatement,
+    ts_morph_1.SyntaxKind.SwitchStatement,
+    ts_morph_1.SyntaxKind.ForStatement,
+    ts_morph_1.SyntaxKind.ForInStatement,
+    ts_morph_1.SyntaxKind.ForOfStatement,
+    ts_morph_1.SyntaxKind.WhileStatement,
+    ts_morph_1.SyntaxKind.DoStatement,
+    ts_morph_1.SyntaxKind.TryStatement,
+    ts_morph_1.SyntaxKind.CatchClause,
+    ts_morph_1.SyntaxKind.ConditionalExpression,
+]);
+function isLogicalAndOr(node) {
+    if (!ts_morph_1.Node.isBinaryExpression(node))
+        return false;
+    const operator = node.getOperatorToken().getKind();
+    return (operator === ts_morph_1.SyntaxKind.AmpersandAmpersandToken ||
+        operator === ts_morph_1.SyntaxKind.BarBarToken);
+}
 function calculateComplexity(sourceFile) {
-    const functions = sourceFile.getFunctions();
-    if (functions.length === 0)
+    const units = getFunctionUnits(sourceFile);
+    if (units.length === 0)
         return null;
     let totalComplexity = 0;
-    functions.forEach((f) => {
+    for (const unit of units) {
         let complexity = 1;
-        complexity += f.getDescendantsOfKind(ts_morph_1.SyntaxKind.IfStatement).length;
-        complexity += f.getDescendantsOfKind(ts_morph_1.SyntaxKind.SwitchStatement).length;
-        complexity += f.getDescendantsOfKind(ts_morph_1.SyntaxKind.ForStatement).length;
-        complexity += f.getDescendantsOfKind(ts_morph_1.SyntaxKind.ForInStatement).length;
-        complexity += f.getDescendantsOfKind(ts_morph_1.SyntaxKind.ForOfStatement).length;
-        complexity += f.getDescendantsOfKind(ts_morph_1.SyntaxKind.WhileStatement).length;
-        complexity += f.getDescendantsOfKind(ts_morph_1.SyntaxKind.DoStatement).length;
-        complexity += f.getDescendantsOfKind(ts_morph_1.SyntaxKind.TryStatement).length;
-        complexity += f.getDescendantsOfKind(ts_morph_1.SyntaxKind.CatchClause).length;
-        complexity += f.getDescendantsOfKind(ts_morph_1.SyntaxKind.ConditionalExpression).length;
-        complexity += f
-            .getDescendantsOfKind(ts_morph_1.SyntaxKind.BinaryExpression)
-            .filter((expr) => typeof expr.getOperatorToken === "function" &&
-            expr.getOperatorToken().getKind() ===
-                ts_morph_1.SyntaxKind.AmpersandAmpersandToken).length;
-        complexity += f
-            .getDescendantsOfKind(ts_morph_1.SyntaxKind.BinaryExpression)
-            .filter((expr) => typeof expr.getOperatorToken === "function" &&
-            expr.getOperatorToken().getKind() === ts_morph_1.SyntaxKind.BarBarToken).length;
+        for (const node of getOwnDescendants(unit)) {
+            if (DECISION_KINDS.has(node.getKind()) || isLogicalAndOr(node)) {
+                complexity++;
+            }
+        }
         totalComplexity += complexity;
-    });
-    const avgComplexity = totalComplexity / functions.length;
+    }
+    const avgComplexity = totalComplexity / units.length;
     return Math.max(0, 1 - (avgComplexity - 1) / 5); // Lowered threshold to 6 for more sensitivity
 }
-function calculateNesting(sourceFile) {
-    const functions = sourceFile.getFunctions();
-    if (functions.length === 0)
-        return null;
-    let maxNesting = 0;
-    function getNesting(node, current = 0) {
-        let localMax = current;
-        node.forEachChild((child) => {
-            if ([
-                ts_morph_1.SyntaxKind.IfStatement,
-                ts_morph_1.SyntaxKind.SwitchStatement,
-                ts_morph_1.SyntaxKind.ForStatement,
-                ts_morph_1.SyntaxKind.ForInStatement,
-                ts_morph_1.SyntaxKind.ForOfStatement,
-                ts_morph_1.SyntaxKind.WhileStatement,
-                ts_morph_1.SyntaxKind.DoStatement,
-            ].includes(child.getKind())) {
-                localMax = Math.max(localMax, getNesting(child, current + 1));
-            }
-            else {
-                localMax = Math.max(localMax, getNesting(child, current));
-            }
-        });
-        return localMax;
-    }
-    functions.forEach((f) => {
-        maxNesting = Math.max(maxNesting, getNesting(f));
+const NESTING_KINDS = new Set([
+    ts_morph_1.SyntaxKind.IfStatement,
+    ts_morph_1.SyntaxKind.SwitchStatement,
+    ts_morph_1.SyntaxKind.ForStatement,
+    ts_morph_1.SyntaxKind.ForInStatement,
+    ts_morph_1.SyntaxKind.ForOfStatement,
+    ts_morph_1.SyntaxKind.WhileStatement,
+    ts_morph_1.SyntaxKind.DoStatement,
+]);
+function getNesting(node, current = 0) {
+    let localMax = current;
+    node.forEachChild((child) => {
+        // nested units are scored on their own
+        if (isFunctionLike(child) && isFunctionUnit(child))
+            return;
+        const depth = NESTING_KINDS.has(child.getKind()) ? current + 1 : current;
+        localMax = Math.max(localMax, getNesting(child, depth));
     });
+    return localMax;
+}
+function calculateNesting(sourceFile) {
+    const units = getFunctionUnits(sourceFile);
+    if (units.length === 0)
+        return null;
+    const maxNesting = Math.max(...units.map((unit) => getNesting(unit)));
     return Math.max(0, 1 - maxNesting / 4);
 }
 const ASSIGNMENT_OPERATORS = new Set([

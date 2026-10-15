@@ -95,4 +95,33 @@ assert.strictEqual(
   "`for (let x of ...)` should be const",
 );
 
+// #5: methods and arrow functions are scored, not just top-level declarations
+const fns = score(join(__dirname, "functions"));
+const units = byName(fns, "units.ts").metrics;
+assert.strictEqual(units.returnTypes, 0, "method and arrow fn lack return types");
+assert.ok(near(units.nesting, 0.25), "method nesting 3 should score 0.25");
+assert.ok(near(units.complexity, 0.7), "avg complexity 2.5 should score 0.7");
+
+const inlineTop = byName(fns, "inline-top.ts").metrics;
+assert.strictEqual(inlineTop.returnTypes, null, "callbacks need no return type");
+assert.strictEqual(inlineTop.complexity, 1);
+
+const inlineNested = byName(fns, "inline-nested.ts").metrics;
+assert.strictEqual(inlineNested.returnTypes, 1);
+assert.ok(
+  near(inlineNested.complexity, 0.8),
+  "callback decisions count toward the enclosing function",
+);
+
+assert.strictEqual(
+  byName(fns, "typed.ts").metrics.returnTypes,
+  null,
+  "contextually typed functions are exempt",
+);
+
+const nestedUnit = byName(fns, "nested-unit.ts").metrics;
+assert.strictEqual(nestedUnit.returnTypes, 1);
+assert.ok(near(nestedUnit.complexity, 0.8), "inner fn scored separately: avg 2");
+assert.ok(near(nestedUnit.nesting, 0.5), "inner fn nesting 2, outer not charged");
+
 console.log("All tests passed");

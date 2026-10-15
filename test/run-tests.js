@@ -124,4 +124,10 @@ assert.strictEqual(nestedUnit.returnTypes, 1);
 assert.ok(near(nestedUnit.complexity, 0.8), "inner fn scored separately: avg 2");
 assert.ok(near(nestedUnit.nesting, 0.5), "inner fn nesting 2, outer not charged");
 
+// #11: every assertion kind is in the denominator, so the metric stays in [0, 1]
+assert.ok(
+  near(byName(assertions, "non-null.ts").metrics.avoidAssertions, 0.25),
+  "3 non-null assertions among 4 expressions should score 0.25, never negative",
+);
+
 console.log("All tests passed");

@@ -415,17 +415,21 @@ function calculateAvoidAssertions(sourceFile) {
     const asNodes = sourceFile.getDescendantsOfKind(ts_morph_1.SyntaxKind.AsExpression);
     // `as const` is a safe literal narrowing, not an unsafe type assertion
     const asAssertions = asNodes.filter((n) => n.getTypeNode()?.getText() !== "const").length;
-    const assertions = sourceFile.getDescendantsOfKind(ts_morph_1.SyntaxKind.TypeAssertionExpression).length +
-        sourceFile.getDescendantsOfKind(ts_morph_1.SyntaxKind.NonNullExpression).length +
-        asAssertions;
-    // Use a sum of common expression kinds as a proxy for total expressions
-    const asExpressions = asNodes.length;
+    const angleBracketAssertions = sourceFile.getDescendantsOfKind(ts_morph_1.SyntaxKind.TypeAssertionExpression).length;
+    const nonNullAssertions = sourceFile.getDescendantsOfKind(ts_morph_1.SyntaxKind.NonNullExpression).length;
+    const assertions = asAssertions + angleBracketAssertions + nonNullAssertions;
+    // Every assertion kind is also part of the denominator, so the ratio can
+    // never exceed 1. Calls and binary expressions are a proxy for "other code".
     const callExpressions = sourceFile.getDescendantsOfKind(ts_morph_1.SyntaxKind.CallExpression).length;
     const binaryExpressions = sourceFile.getDescendantsOfKind(ts_morph_1.SyntaxKind.BinaryExpression).length;
-    const totalExpressions = asExpressions + callExpressions + binaryExpressions;
+    const totalExpressions = asNodes.length +
+        angleBracketAssertions +
+        nonNullAssertions +
+        callExpressions +
+        binaryExpressions;
     if (totalExpressions === 0)
         return null;
-    return 1 - assertions / totalExpressions;
+    return Math.max(0, 1 - assertions / totalExpressions);
 }
 function calculateUseReadonly(sourceFile) {
     const properties = sourceFile.getDescendantsOfKind(ts_morph_1.SyntaxKind.PropertyDeclaration);

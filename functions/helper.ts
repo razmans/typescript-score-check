@@ -507,21 +507,29 @@ export function calculateAvoidAssertions(sourceFile: SourceFile): MetricValue {
   const asAssertions = asNodes.filter(
     (n) => n.getTypeNode()?.getText() !== "const",
   ).length;
-  const assertions =
-    sourceFile.getDescendantsOfKind(SyntaxKind.TypeAssertionExpression).length +
-    sourceFile.getDescendantsOfKind(SyntaxKind.NonNullExpression).length +
-    asAssertions;
-  // Use a sum of common expression kinds as a proxy for total expressions
-  const asExpressions = asNodes.length;
+  const angleBracketAssertions = sourceFile.getDescendantsOfKind(
+    SyntaxKind.TypeAssertionExpression,
+  ).length;
+  const nonNullAssertions = sourceFile.getDescendantsOfKind(
+    SyntaxKind.NonNullExpression,
+  ).length;
+  const assertions = asAssertions + angleBracketAssertions + nonNullAssertions;
+  // Every assertion kind is also part of the denominator, so the ratio can
+  // never exceed 1. Calls and binary expressions are a proxy for "other code".
   const callExpressions = sourceFile.getDescendantsOfKind(
     SyntaxKind.CallExpression,
   ).length;
   const binaryExpressions = sourceFile.getDescendantsOfKind(
     SyntaxKind.BinaryExpression,
   ).length;
-  const totalExpressions = asExpressions + callExpressions + binaryExpressions;
+  const totalExpressions =
+    asNodes.length +
+    angleBracketAssertions +
+    nonNullAssertions +
+    callExpressions +
+    binaryExpressions;
   if (totalExpressions === 0) return null;
-  return 1 - assertions / totalExpressions;
+  return Math.max(0, 1 - assertions / totalExpressions);
 }
 
 export function calculateUseReadonly(sourceFile: SourceFile): MetricValue {

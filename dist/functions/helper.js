@@ -450,13 +450,15 @@ function calculateUseReadonly(sourceFile) {
     }).length;
     return readonlyCount / properties.length;
 }
+// `using` / `await using` declarations are block scoped too, not `var`
+const BLOCK_SCOPED_FLAGS = ts_morph_1.ts.NodeFlags.Let | ts_morph_1.ts.NodeFlags.Const | ts_morph_1.ts.NodeFlags.Using;
 function calculateAvoidVar(sourceFile) {
     const declarations = sourceFile.getDescendantsOfKind(ts_morph_1.SyntaxKind.VariableDeclaration);
     if (declarations.length === 0)
         return null;
     return declarations
         .some((v) => v.getParent().getKind() === ts_morph_1.SyntaxKind.VariableDeclarationList &&
-        !(v.getParent().getFlags() & (ts_morph_1.ts.NodeFlags.Let | ts_morph_1.ts.NodeFlags.Const)))
+        !(v.getParent().getFlags() & BLOCK_SCOPED_FLAGS))
         ? 0
         : 1;
 }

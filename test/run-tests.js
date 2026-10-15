@@ -141,4 +141,9 @@ assert.ok(
   "an if nested in an else-if body is two levels deep (0.5)",
 );
 
+// #13: `using` is block scoped, only `var` is flagged
+const vars = score(join(__dirname, "var"));
+assert.strictEqual(byName(vars, "using.ts").metrics.avoidVar, 1);
+assert.strictEqual(byName(vars, "var.ts").metrics.avoidVar, 0);
+
 console.log("All tests passed");

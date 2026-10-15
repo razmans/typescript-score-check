@@ -559,6 +559,10 @@ export function calculateUseReadonly(sourceFile: SourceFile): MetricValue {
   return readonlyCount / properties.length;
 }
 
+// `using` / `await using` declarations are block scoped too, not `var`
+const BLOCK_SCOPED_FLAGS =
+  ts.NodeFlags.Let | ts.NodeFlags.Const | ts.NodeFlags.Using;
+
 export function calculateAvoidVar(sourceFile: SourceFile): MetricValue {
   const declarations = sourceFile.getDescendantsOfKind(
     SyntaxKind.VariableDeclaration,
@@ -568,7 +572,7 @@ export function calculateAvoidVar(sourceFile: SourceFile): MetricValue {
     .some(
       (v: VariableDeclaration) =>
         v.getParent().getKind() === SyntaxKind.VariableDeclarationList &&
-        !(v.getParent().getFlags() & (ts.NodeFlags.Let | ts.NodeFlags.Const)),
+        !(v.getParent().getFlags() & BLOCK_SCOPED_FLAGS),
     )
     ? 0
     : 1;

@@ -18,6 +18,7 @@ import {
   calculateUseReadonly,
   formatHumanReadable,
   generateSuggestions,
+  getSyntaxErrors,
   getTsFiles,
   ScoreResult,
   weights,
@@ -52,11 +53,19 @@ program
           avoidVar: calculateAvoidVar(sourceFile),
           optionalChaining: calculateOptionalChaining(sourceFile),
         };
+        const parseErrors = getSyntaxErrors(sourceFile);
+        if (parseErrors.length > 0) {
+          console.error(
+            `warning: ${file} has ${parseErrors.length} syntax error(s); scores may be unreliable`,
+          );
+          process.exitCode = 1;
+        }
         scores.push({
           file,
           score: calculateScore(metrics),
           metrics,
           suggestions: generateSuggestions(metrics),
+          parseErrors,
         });
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);

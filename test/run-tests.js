@@ -155,6 +155,21 @@ assert.ok(
   "try/catch is complexity 2 (score 0.8), not 3",
 );
 
+// #19: syntax errors are reported, not silently scored as n/a
+const syntax = spawnSync(process.execPath, [cli, join(__dirname, "syntax"), "--json"], {
+  encoding: "utf8",
+});
+assert.strictEqual(syntax.status, 1, "a file with syntax errors must exit 1");
+assert.ok(syntax.stderr.includes("syntax error"), "syntax errors warned on stderr");
+const syntaxResults = JSON.parse(syntax.stdout);
+assert.ok(byName(syntaxResults, "broken.ts").parseErrors.length > 0);
+assert.ok(
+  byName(syntaxResults, "broken.ts").parseErrors[0].startsWith("line "),
+  "syntax errors carry a line number",
+);
+assert.deepStrictEqual(byName(syntaxResults, "fine.ts").parseErrors, []);
+assert.deepStrictEqual(good.parseErrors, [], "valid files have no parse errors");
+
 // #14: the CLI must not crash on bad paths, bad symlinks or very deep trees
 const tmp = fs.mkdtempSync(join(os.tmpdir(), "ts-score-check-"));
 try {

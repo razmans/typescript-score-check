@@ -108,6 +108,58 @@ export interface ScoreResult {
   score: number | null;
   metrics: ScoreMetrics;
   suggestions: string[];
+  // Syntax errors found by the TypeScript parser ("line N: message"). When
+  // present, the metrics were computed on a partially parsed file.
+  parseErrors: string[];
+}
+
+// Syntax errors reported by the TypeScript parser, as "line N: message".
+// ts-morph parses broken files without complaint, so they would otherwise
+// look like files with nothing to score. This only parses (no emit, no type
+// checking, no module resolution), so it is cheap and cannot overflow on deep
+// trees the way an emit would.
+export function getSyntaxErrors(sourceFile: SourceFile): string[] {
+  const fileName = sourceFile.getFilePath();
+  const parsed = ts.createSourceFile(
+    fileName,
+    sourceFile.getFullText(),
+    ts.ScriptTarget.Latest,
+  );
+  const host: ts.CompilerHost = {
+    getSourceFile: (name) => (name === fileName ? parsed : undefined),
+    getDefaultLibFileName: () => "lib.d.ts",
+    writeFile: () => undefined,
+    getCurrentDirectory: () => "",
+    getCanonicalFileName: (name) => name,
+    useCaseSensitiveFileNames: () => true,
+    getNewLine: () => "\n",
+    fileExists: (name) => name === fileName,
+    readFile: () => undefined,
+  };
+  const program = ts.createProgram(
+    [fileName],
+    { noLib: true, noResolve: true, jsx: ts.JsxEmit.Preserve },
+    host,
+  );
+  return program
+    .getSyntacticDiagnostics(parsed)
+    .filter((d) => d.category === ts.DiagnosticCategory.Error)
+    .map((d) => {
+      const message = ts.flattenDiagnosticMessageText(d.messageText, " ");
+      if (!d.file || d.start === undefined) return message;
+      const { line } = d.file.getLineAndCharacterOfPosition(d.start);
+      return `line ${line + 1}: ${message}`;
+    });
+}
+
+const MAX_SHOWN_PARSE_ERRORS = 5;
+
+function formatParseErrors(errors: string[]): string {
+  if (errors.length === 0) return "";
+  const shown = errors.slice(0, MAX_SHOWN_PARSE_ERRORS).map((e) => `  ${e}`);
+  const hidden = errors.length - shown.length;
+  if (hidden > 0) shown.push(`  ...and ${hidden} more`);
+  return `WARNING: ${errors.length} syntax error(s), scores may be unreliable:\n${shown.join("\n")}\n\n`;
 }
 
 function formatPercent(value: MetricValue): string {
@@ -118,14 +170,16 @@ export function formatHumanReadable(scores: ScoreResult[]): string {
   return scores
     .map(
       (s) =>
-        `\nFILE: ${s.file}\n\nSCORE: ${
+        `\nFILE: ${s.file}\n\n${formatParseErrors(s.parseErrors)}SCORE: ${
           s.score === null ? "n/a" : `${s.score.toFixed(2)}/100`
         }\n\n${Object.entries(s.metrics)
           .map(([k, v]) => `${k}: ${formatPercent(v)}`)
           .join("\n")}\n\n${
           s.suggestions.length > 0
             ? `SUGGESTIONS:\n${s.suggestions.join("\n")}`
-            : "No suggestions, great job!"
+            : s.parseErrors.length > 0
+              ? ""
+              : "No suggestions, great job!"
         }`,
     )
     .join("\n\n");

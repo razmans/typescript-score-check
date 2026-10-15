@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.weights = void 0;
 exports.getTsFiles = getTsFiles;
+exports.getSyntaxErrors = getSyntaxErrors;
 exports.formatHumanReadable = formatHumanReadable;
 exports.generateSuggestions = generateSuggestions;
 exports.calculateAvoidAny = calculateAvoidAny;
@@ -85,16 +86,59 @@ function getTsFiles(path) {
     }
     return files.sort();
 }
+// Syntax errors reported by the TypeScript parser, as "line N: message".
+// ts-morph parses broken files without complaint, so they would otherwise
+// look like files with nothing to score. This only parses (no emit, no type
+// checking, no module resolution), so it is cheap and cannot overflow on deep
+// trees the way an emit would.
+function getSyntaxErrors(sourceFile) {
+    const fileName = sourceFile.getFilePath();
+    const parsed = ts_morph_1.ts.createSourceFile(fileName, sourceFile.getFullText(), ts_morph_1.ts.ScriptTarget.Latest);
+    const host = {
+        getSourceFile: (name) => (name === fileName ? parsed : undefined),
+        getDefaultLibFileName: () => "lib.d.ts",
+        writeFile: () => undefined,
+        getCurrentDirectory: () => "",
+        getCanonicalFileName: (name) => name,
+        useCaseSensitiveFileNames: () => true,
+        getNewLine: () => "\n",
+        fileExists: (name) => name === fileName,
+        readFile: () => undefined,
+    };
+    const program = ts_morph_1.ts.createProgram([fileName], { noLib: true, noResolve: true, jsx: ts_morph_1.ts.JsxEmit.Preserve }, host);
+    return program
+        .getSyntacticDiagnostics(parsed)
+        .filter((d) => d.category === ts_morph_1.ts.DiagnosticCategory.Error)
+        .map((d) => {
+        const message = ts_morph_1.ts.flattenDiagnosticMessageText(d.messageText, " ");
+        if (!d.file || d.start === undefined)
+            return message;
+        const { line } = d.file.getLineAndCharacterOfPosition(d.start);
+        return `line ${line + 1}: ${message}`;
+    });
+}
+const MAX_SHOWN_PARSE_ERRORS = 5;
+function formatParseErrors(errors) {
+    if (errors.length === 0)
+        return "";
+    const shown = errors.slice(0, MAX_SHOWN_PARSE_ERRORS).map((e) => `  ${e}`);
+    const hidden = errors.length - shown.length;
+    if (hidden > 0)
+        shown.push(`  ...and ${hidden} more`);
+    return `WARNING: ${errors.length} syntax error(s), scores may be unreliable:\n${shown.join("\n")}\n\n`;
+}
 function formatPercent(value) {
     return value === null ? "n/a" : `${(value * 100).toFixed(2)}%`;
 }
 function formatHumanReadable(scores) {
     return scores
-        .map((s) => `\nFILE: ${s.file}\n\nSCORE: ${s.score === null ? "n/a" : `${s.score.toFixed(2)}/100`}\n\n${Object.entries(s.metrics)
+        .map((s) => `\nFILE: ${s.file}\n\n${formatParseErrors(s.parseErrors)}SCORE: ${s.score === null ? "n/a" : `${s.score.toFixed(2)}/100`}\n\n${Object.entries(s.metrics)
         .map(([k, v]) => `${k}: ${formatPercent(v)}`)
         .join("\n")}\n\n${s.suggestions.length > 0
         ? `SUGGESTIONS:\n${s.suggestions.join("\n")}`
-        : "No suggestions, great job!"}`)
+        : s.parseErrors.length > 0
+            ? ""
+            : "No suggestions, great job!"}`)
         .join("\n\n");
 }
 function isImperfect(value) {

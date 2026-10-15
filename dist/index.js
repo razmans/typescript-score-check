@@ -35,11 +35,17 @@ commander_1.program
                 avoidVar: (0, helper_1.calculateAvoidVar)(sourceFile),
                 optionalChaining: (0, helper_1.calculateOptionalChaining)(sourceFile),
             };
+            const parseErrors = (0, helper_1.getSyntaxErrors)(sourceFile);
+            if (parseErrors.length > 0) {
+                console.error(`warning: ${file} has ${parseErrors.length} syntax error(s); scores may be unreliable`);
+                process.exitCode = 1;
+            }
             scores.push({
                 file,
                 score: (0, helper_1.calculateScore)(metrics),
                 metrics,
                 suggestions: (0, helper_1.generateSuggestions)(metrics),
+                parseErrors,
             });
         }
         catch (error) {

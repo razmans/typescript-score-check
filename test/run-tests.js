@@ -78,4 +78,21 @@ assert.strictEqual(
   "plain boolean && is not a null check",
 );
 
+// #4: only a `let` that is never reassigned is a violation
+const consts = score(join(__dirname, "const"));
+assert.ok(
+  near(byName(consts, "let-cases.ts").metrics.preferConst, 0.8),
+  "1 unnecessary let among 5 declarations should score 0.8",
+);
+assert.strictEqual(
+  byName(consts, "destructure.ts").metrics.preferConst,
+  1,
+  "lets reassigned by destructuring are justified",
+);
+assert.strictEqual(
+  byName(consts, "for-of.ts").metrics.preferConst,
+  0,
+  "`for (let x of ...)` should be const",
+);
+
 console.log("All tests passed");

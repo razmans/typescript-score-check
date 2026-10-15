@@ -209,17 +209,126 @@ function calculateNesting(sourceFile) {
     });
     return Math.max(0, 1 - maxNesting / 4);
 }
+const ASSIGNMENT_OPERATORS = new Set([
+    "=",
+    "+=",
+    "-=",
+    "*=",
+    "/=",
+    "%=",
+    "**=",
+    "<<=",
+    ">>=",
+    ">>>=",
+    "&=",
+    "|=",
+    "^=",
+    "&&=",
+    "||=",
+    "??=",
+]);
+function isLoopInitializer(node, parent) {
+    return ((ts_morph_1.Node.isForOfStatement(parent) || ts_morph_1.Node.isForInStatement(parent)) &&
+        parent.getInitializer() === node);
+}
+// `[a, b] = [b, a]`, `({ a } = obj)`, `for ([a, b] of pairs)`
+function isDestructuringAssignmentTarget(id) {
+    let node = id;
+    let parent = node.getParent();
+    while (parent) {
+        if (ts_morph_1.Node.isArrayLiteralExpression(parent) ||
+            ts_morph_1.Node.isObjectLiteralExpression(parent) ||
+            ts_morph_1.Node.isSpreadElement(parent) ||
+            ts_morph_1.Node.isSpreadAssignment(parent) ||
+            ts_morph_1.Node.isShorthandPropertyAssignment(parent) ||
+            ts_morph_1.Node.isParenthesizedExpression(parent) ||
+            (ts_morph_1.Node.isPropertyAssignment(parent) && parent.getInitializer() === node)) {
+            node = parent;
+            parent = node.getParent();
+            continue;
+        }
+        if (node === id)
+            return false;
+        if (ts_morph_1.Node.isBinaryExpression(parent) &&
+            parent.getOperatorToken().getText() === "=" &&
+            parent.getLeft() === node) {
+            return true;
+        }
+        return isLoopInitializer(node, parent);
+    }
+    return false;
+}
+function isWriteReference(id) {
+    const parent = id.getParent();
+    if (!parent)
+        return false;
+    if (ts_morph_1.Node.isBinaryExpression(parent) && parent.getLeft() === id) {
+        return ASSIGNMENT_OPERATORS.has(parent.getOperatorToken().getText());
+    }
+    if ((ts_morph_1.Node.isPrefixUnaryExpression(parent) ||
+        ts_morph_1.Node.isPostfixUnaryExpression(parent)) &&
+        parent.getOperand() === id) {
+        const operator = parent.getOperatorToken();
+        return (operator === ts_morph_1.SyntaxKind.PlusPlusToken ||
+            operator === ts_morph_1.SyntaxKind.MinusMinusToken);
+    }
+    if (isLoopInitializer(id, parent))
+        return true;
+    return isDestructuringAssignmentTarget(id);
+}
+function bindingIdentifiers(declaration) {
+    const name = declaration.getNameNode();
+    if (ts_morph_1.Node.isIdentifier(name))
+        return [name];
+    return name
+        .getDescendantsOfKind(ts_morph_1.SyntaxKind.BindingElement)
+        .map((element) => element.getNameNode())
+        .filter((n) => ts_morph_1.Node.isIdentifier(n));
+}
+// The region in which a `let` is visible and may be reassigned
+function letScope(declaration) {
+    const statement = declaration.getParent()?.getParent();
+    if (statement &&
+        (ts_morph_1.Node.isForStatement(statement) ||
+            ts_morph_1.Node.isForInStatement(statement) ||
+            ts_morph_1.Node.isForOfStatement(statement))) {
+        return statement;
+    }
+    return (declaration.getFirstAncestor((a) => ts_morph_1.Node.isBlock(a) ||
+        ts_morph_1.Node.isModuleBlock(a) ||
+        ts_morph_1.Node.isCaseBlock(a) ||
+        ts_morph_1.Node.isSourceFile(a)) ?? declaration.getSourceFile());
+}
+// A `let` is justified if it is reassigned anywhere in its scope (counters,
+// accumulators, `i++` loops, destructuring assignment) or is declared without
+// an initializer (deferred assignment). Name matching is syntactic, so a
+// shadowing variable's writes can make this lenient, never stricter.
+function needsLet(declaration) {
+    const loopStatement = declaration.getParent()?.getParent();
+    const isLoopVariable = !!loopStatement &&
+        (ts_morph_1.Node.isForInStatement(loopStatement) ||
+            ts_morph_1.Node.isForOfStatement(loopStatement));
+    if (!declaration.getInitializer() && !isLoopVariable)
+        return true;
+    const names = new Set(bindingIdentifiers(declaration).map((i) => i.getText()));
+    return letScope(declaration)
+        .getDescendantsOfKind(ts_morph_1.SyntaxKind.Identifier)
+        .some((id) => names.has(id.getText()) && isWriteReference(id));
+}
 function calculatePreferConst(sourceFile) {
-    const lets = sourceFile
+    const declarations = sourceFile
         .getDescendantsOfKind(ts_morph_1.SyntaxKind.VariableDeclaration)
-        .filter((v) => v.getParent().getKind() === ts_morph_1.SyntaxKind.VariableDeclarationList &&
-        v.getParent().getFlags() & ts_morph_1.ts.NodeFlags.Let);
-    const consts = sourceFile
-        .getDescendantsOfKind(ts_morph_1.SyntaxKind.VariableDeclaration)
-        .filter((v) => v.getParent().getKind() === ts_morph_1.SyntaxKind.VariableDeclarationList &&
-        v.getParent().getFlags() & ts_morph_1.ts.NodeFlags.Const);
+        .filter((v) => {
+        const list = v.getParent();
+        return list.getKind() === ts_morph_1.SyntaxKind.VariableDeclarationList;
+    });
+    const lets = declarations.filter((v) => v.getParent().getFlags() & ts_morph_1.ts.NodeFlags.Let);
+    const consts = declarations.filter((v) => v.getParent().getFlags() & ts_morph_1.ts.NodeFlags.Const);
     const total = lets.length + consts.length;
-    return total === 0 ? null : consts.length / total;
+    if (total === 0)
+        return null;
+    const unnecessaryLets = lets.filter((v) => !needsLet(v)).length;
+    return 1 - unnecessaryLets / total;
 }
 function calculateAvoidAssertions(sourceFile) {
     const asNodes = sourceFile.getDescendantsOfKind(ts_morph_1.SyntaxKind.AsExpression);

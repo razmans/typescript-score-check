@@ -9,6 +9,7 @@ import {
   ClassDeclaration,
   ClassMemberTypes,
   BinaryExpression,
+  Identifier,
   ConditionalExpression,
   FunctionDeclaration,
   VariableDeclaration,
@@ -260,23 +261,149 @@ export function calculateNesting(sourceFile: SourceFile): MetricValue {
   return Math.max(0, 1 - maxNesting / 4);
 }
 
+const ASSIGNMENT_OPERATORS: ReadonlySet<string> = new Set([
+  "=",
+  "+=",
+  "-=",
+  "*=",
+  "/=",
+  "%=",
+  "**=",
+  "<<=",
+  ">>=",
+  ">>>=",
+  "&=",
+  "|=",
+  "^=",
+  "&&=",
+  "||=",
+  "??=",
+]);
+
+function isLoopInitializer(node: Node, parent: Node): boolean {
+  return (
+    (Node.isForOfStatement(parent) || Node.isForInStatement(parent)) &&
+    parent.getInitializer() === node
+  );
+}
+
+// `[a, b] = [b, a]`, `({ a } = obj)`, `for ([a, b] of pairs)`
+function isDestructuringAssignmentTarget(id: Identifier): boolean {
+  let node: Node = id;
+  let parent = node.getParent();
+  while (parent) {
+    if (
+      Node.isArrayLiteralExpression(parent) ||
+      Node.isObjectLiteralExpression(parent) ||
+      Node.isSpreadElement(parent) ||
+      Node.isSpreadAssignment(parent) ||
+      Node.isShorthandPropertyAssignment(parent) ||
+      Node.isParenthesizedExpression(parent) ||
+      (Node.isPropertyAssignment(parent) && parent.getInitializer() === node)
+    ) {
+      node = parent;
+      parent = node.getParent();
+      continue;
+    }
+    if (node === id) return false;
+    if (
+      Node.isBinaryExpression(parent) &&
+      parent.getOperatorToken().getText() === "=" &&
+      parent.getLeft() === node
+    ) {
+      return true;
+    }
+    return isLoopInitializer(node, parent);
+  }
+  return false;
+}
+
+function isWriteReference(id: Identifier): boolean {
+  const parent = id.getParent();
+  if (!parent) return false;
+  if (Node.isBinaryExpression(parent) && parent.getLeft() === id) {
+    return ASSIGNMENT_OPERATORS.has(parent.getOperatorToken().getText());
+  }
+  if (
+    (Node.isPrefixUnaryExpression(parent) ||
+      Node.isPostfixUnaryExpression(parent)) &&
+    parent.getOperand() === id
+  ) {
+    const operator = parent.getOperatorToken();
+    return (
+      operator === SyntaxKind.PlusPlusToken ||
+      operator === SyntaxKind.MinusMinusToken
+    );
+  }
+  if (isLoopInitializer(id, parent)) return true;
+  return isDestructuringAssignmentTarget(id);
+}
+
+function bindingIdentifiers(declaration: VariableDeclaration): Identifier[] {
+  const name = declaration.getNameNode();
+  if (Node.isIdentifier(name)) return [name];
+  return name
+    .getDescendantsOfKind(SyntaxKind.BindingElement)
+    .map((element) => element.getNameNode())
+    .filter((n): n is Identifier => Node.isIdentifier(n));
+}
+
+// The region in which a `let` is visible and may be reassigned
+function letScope(declaration: VariableDeclaration): Node {
+  const statement = declaration.getParent()?.getParent();
+  if (
+    statement &&
+    (Node.isForStatement(statement) ||
+      Node.isForInStatement(statement) ||
+      Node.isForOfStatement(statement))
+  ) {
+    return statement;
+  }
+  return (
+    declaration.getFirstAncestor(
+      (a) =>
+        Node.isBlock(a) ||
+        Node.isModuleBlock(a) ||
+        Node.isCaseBlock(a) ||
+        Node.isSourceFile(a),
+    ) ?? declaration.getSourceFile()
+  );
+}
+
+// A `let` is justified if it is reassigned anywhere in its scope (counters,
+// accumulators, `i++` loops, destructuring assignment) or is declared without
+// an initializer (deferred assignment). Name matching is syntactic, so a
+// shadowing variable's writes can make this lenient, never stricter.
+function needsLet(declaration: VariableDeclaration): boolean {
+  const loopStatement = declaration.getParent()?.getParent();
+  const isLoopVariable =
+    !!loopStatement &&
+    (Node.isForInStatement(loopStatement) ||
+      Node.isForOfStatement(loopStatement));
+  if (!declaration.getInitializer() && !isLoopVariable) return true;
+  const names = new Set(bindingIdentifiers(declaration).map((i) => i.getText()));
+  return letScope(declaration)
+    .getDescendantsOfKind(SyntaxKind.Identifier)
+    .some((id) => names.has(id.getText()) && isWriteReference(id));
+}
+
 export function calculatePreferConst(sourceFile: SourceFile): MetricValue {
-  const lets = sourceFile
+  const declarations = sourceFile
     .getDescendantsOfKind(SyntaxKind.VariableDeclaration)
-    .filter(
-      (v: VariableDeclaration) =>
-        v.getParent().getKind() === SyntaxKind.VariableDeclarationList &&
-        v.getParent().getFlags() & ts.NodeFlags.Let,
-    );
-  const consts = sourceFile
-    .getDescendantsOfKind(SyntaxKind.VariableDeclaration)
-    .filter(
-      (v: VariableDeclaration) =>
-        v.getParent().getKind() === SyntaxKind.VariableDeclarationList &&
-        v.getParent().getFlags() & ts.NodeFlags.Const,
-    );
+    .filter((v: VariableDeclaration) => {
+      const list = v.getParent();
+      return list.getKind() === SyntaxKind.VariableDeclarationList;
+    });
+  const lets = declarations.filter(
+    (v) => v.getParent().getFlags() & ts.NodeFlags.Let,
+  );
+  const consts = declarations.filter(
+    (v) => v.getParent().getFlags() & ts.NodeFlags.Const,
+  );
   const total = lets.length + consts.length;
-  return total === 0 ? null : consts.length / total;
+  if (total === 0) return null;
+  const unnecessaryLets = lets.filter((v) => !needsLet(v)).length;
+  return 1 - unnecessaryLets / total;
 }
 
 export function calculateAvoidAssertions(sourceFile: SourceFile): MetricValue {

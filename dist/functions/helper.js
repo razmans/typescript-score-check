@@ -434,33 +434,48 @@ function letScope(declaration) {
         ts_morph_1.Node.isCaseBlock(a) ||
         ts_morph_1.Node.isSourceFile(a)) ?? declaration.getSourceFile());
 }
+// Every identifier that is written to (assignment, ++/--, destructuring
+// assignment, loop variable), grouped by name. Computed once per file so each
+// `let` is a map lookup instead of a scan of its whole scope.
+function collectWriteReferences(sourceFile) {
+    const writes = new Map();
+    for (const id of descendantsOfKind(sourceFile, ts_morph_1.SyntaxKind.Identifier)) {
+        if (!isWriteReference(id))
+            continue;
+        const name = id.getText();
+        const existing = writes.get(name);
+        if (existing)
+            existing.push(id);
+        else
+            writes.set(name, [id]);
+    }
+    return writes;
+}
 // A `let` is justified if it is reassigned anywhere in its scope (counters,
 // accumulators, `i++` loops, destructuring assignment) or is declared without
 // an initializer (deferred assignment). Name matching is syntactic, so a
 // shadowing variable's writes can make this lenient, never stricter.
-function needsLet(declaration) {
+function needsLet(declaration, writes) {
     const loopStatement = declaration.getParent()?.getParent();
     const isLoopVariable = !!loopStatement &&
         (ts_morph_1.Node.isForInStatement(loopStatement) ||
             ts_morph_1.Node.isForOfStatement(loopStatement));
     if (!declaration.getInitializer() && !isLoopVariable)
         return true;
-    const names = new Set(bindingIdentifiers(declaration).map((i) => i.getText()));
-    return descendantsOfKind(letScope(declaration), ts_morph_1.SyntaxKind.Identifier)
-        .some((id) => names.has(id.getText()) && isWriteReference(id));
+    const scope = letScope(declaration);
+    const scopeStart = scope.getPos();
+    const scopeEnd = scope.getEnd();
+    return bindingIdentifiers(declaration).some((binding) => (writes.get(binding.getText()) ?? []).some((id) => id.getPos() >= scopeStart && id.getEnd() <= scopeEnd));
 }
 function calculatePreferConst(sourceFile) {
-    const declarations = descendantsOfKind(sourceFile, ts_morph_1.SyntaxKind.VariableDeclaration)
-        .filter((v) => {
-        const list = v.getParent();
-        return list.getKind() === ts_morph_1.SyntaxKind.VariableDeclarationList;
-    });
+    const declarations = descendantsOfKind(sourceFile, ts_morph_1.SyntaxKind.VariableDeclaration).filter((v) => v.getParent().getKind() === ts_morph_1.SyntaxKind.VariableDeclarationList);
     const lets = declarations.filter((v) => v.getParent().getFlags() & ts_morph_1.ts.NodeFlags.Let);
     const consts = declarations.filter((v) => v.getParent().getFlags() & ts_morph_1.ts.NodeFlags.Const);
     const total = lets.length + consts.length;
     if (total === 0)
         return null;
-    const unnecessaryLets = lets.filter((v) => !needsLet(v)).length;
+    const writes = lets.length > 0 ? collectWriteReferences(sourceFile) : new Map();
+    const unnecessaryLets = lets.filter((v) => !needsLet(v, writes)).length;
     return 1 - unnecessaryLets / total;
 }
 function calculateAvoidAssertions(sourceFile) {

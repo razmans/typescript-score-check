@@ -527,28 +527,55 @@ function letScope(declaration: VariableDeclaration): Node {
   );
 }
 
+// Every identifier that is written to (assignment, ++/--, destructuring
+// assignment, loop variable), grouped by name. Computed once per file so each
+// `let` is a map lookup instead of a scan of its whole scope.
+function collectWriteReferences(
+  sourceFile: SourceFile,
+): Map<string, Identifier[]> {
+  const writes = new Map<string, Identifier[]>();
+  for (const id of descendantsOfKind(sourceFile, SyntaxKind.Identifier)) {
+    if (!isWriteReference(id)) continue;
+    const name = id.getText();
+    const existing = writes.get(name);
+    if (existing) existing.push(id);
+    else writes.set(name, [id]);
+  }
+  return writes;
+}
+
 // A `let` is justified if it is reassigned anywhere in its scope (counters,
 // accumulators, `i++` loops, destructuring assignment) or is declared without
 // an initializer (deferred assignment). Name matching is syntactic, so a
 // shadowing variable's writes can make this lenient, never stricter.
-function needsLet(declaration: VariableDeclaration): boolean {
+function needsLet(
+  declaration: VariableDeclaration,
+  writes: Map<string, Identifier[]>,
+): boolean {
   const loopStatement = declaration.getParent()?.getParent();
   const isLoopVariable =
     !!loopStatement &&
     (Node.isForInStatement(loopStatement) ||
       Node.isForOfStatement(loopStatement));
   if (!declaration.getInitializer() && !isLoopVariable) return true;
-  const names = new Set(bindingIdentifiers(declaration).map((i) => i.getText()));
-  return descendantsOfKind(letScope(declaration), SyntaxKind.Identifier)
-    .some((id) => names.has(id.getText()) && isWriteReference(id));
+  const scope = letScope(declaration);
+  const scopeStart = scope.getPos();
+  const scopeEnd = scope.getEnd();
+  return bindingIdentifiers(declaration).some((binding) =>
+    (writes.get(binding.getText()) ?? []).some(
+      (id) => id.getPos() >= scopeStart && id.getEnd() <= scopeEnd,
+    ),
+  );
 }
 
 export function calculatePreferConst(sourceFile: SourceFile): MetricValue {
-  const declarations = descendantsOfKind(sourceFile, SyntaxKind.VariableDeclaration)
-    .filter((v: VariableDeclaration) => {
-      const list = v.getParent();
-      return list.getKind() === SyntaxKind.VariableDeclarationList;
-    });
+  const declarations = descendantsOfKind(
+    sourceFile,
+    SyntaxKind.VariableDeclaration,
+  ).filter(
+    (v: VariableDeclaration) =>
+      v.getParent().getKind() === SyntaxKind.VariableDeclarationList,
+  );
   const lets = declarations.filter(
     (v) => v.getParent().getFlags() & ts.NodeFlags.Let,
   );
@@ -557,7 +584,8 @@ export function calculatePreferConst(sourceFile: SourceFile): MetricValue {
   );
   const total = lets.length + consts.length;
   if (total === 0) return null;
-  const unnecessaryLets = lets.filter((v) => !needsLet(v)).length;
+  const writes = lets.length > 0 ? collectWriteReferences(sourceFile) : new Map();
+  const unnecessaryLets = lets.filter((v) => !needsLet(v, writes)).length;
   return 1 - unnecessaryLets / total;
 }
 

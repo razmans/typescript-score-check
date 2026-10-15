@@ -198,4 +198,20 @@ try {
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 
+// #15: preferConst must scale (was quadratic: 4,000 lets took ~42s)
+const lotsDir = fs.mkdtempSync(join(os.tmpdir(), "ts-score-check-lets-"));
+try {
+  const lines = [];
+  for (let i = 0; i < 4000; i++) lines.push(`let v${i} = ${i};`);
+  for (let i = 0; i < 4000; i += 2) lines.push(`v${i}++;`);
+  fs.writeFileSync(join(lotsDir, "lets.ts"), lines.join("\n") + "\n");
+  const started = Date.now();
+  const lots = score(lotsDir)[0];
+  const seconds = (Date.now() - started) / 1000;
+  assert.ok(near(lots.metrics.preferConst, 0.5), "half of the lets are reassigned");
+  assert.ok(seconds < 15, `4,000 lets should score quickly, took ${seconds}s`);
+} finally {
+  fs.rmSync(lotsDir, { recursive: true, force: true });
+}
+
 console.log("All tests passed");

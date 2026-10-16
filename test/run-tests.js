@@ -288,4 +288,16 @@ for (const bad of ["abc", "101", "-1", ""]) {
   assert.ok(r.stderr.includes("--min-score"), r.stderr);
 }
 
+// #16: useReadonly ignores properties that are reassigned
+const ro = score(join(__dirname, "readonly"));
+assert.strictEqual(byName(ro, "mutated.ts").metrics.useReadonly, null, "mutated-only property is n/a");
+assert.strictEqual(byName(ro, "none.ts").metrics.useReadonly, null);
+// eligible: a (readonly), b, d  -> only a is readonly; c, e, #f are mutated
+assert.ok(near(byName(ro, "mixed.ts").metrics.useReadonly, 1 / 3), "mixed.ts useReadonly");
+
+// #17: only public/private/protected/#private count; constructors and static blocks are exempt
+const access = score(join(__dirname, "access"))[0];
+// members: total, load, id, ok, hidden, shared, #secret -> ok, hidden, shared, #secret = 4/7
+assert.ok(near(access.metrics.accessModifiers, 4 / 7), `accessModifiers ${access.metrics.accessModifiers}`);
+
 console.log("All tests passed");

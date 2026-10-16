@@ -5,8 +5,6 @@ import {
   ts,
   SourceFile,
   Node,
-  ClassDeclaration,
-  ClassMemberTypes,
   BinaryExpression,
   Identifier,
   ConditionalExpression,
@@ -381,23 +379,39 @@ export function calculateReturnTypes(sourceFile: SourceFile): MetricValue {
   return withReturn / functions.length;
 }
 
+const ACCESS_MODIFIER_KINDS = new Set<SyntaxKind>([
+  SyntaxKind.PublicKeyword,
+  SyntaxKind.PrivateKeyword,
+  SyntaxKind.ProtectedKeyword,
+]);
+
+// Only an explicit public/private/protected counts (`static`, `async`,
+// `readonly`, `override`... do not), and a `#private` name is private by
+// definition. Constructors (conventionally written without `public`), static
+// blocks and index signatures have no access level to declare, so they are
+// not counted as members.
 export function calculateAccessModifiers(sourceFile: SourceFile): MetricValue {
   const classes = sourceFile.getClasses();
-  if (classes.length === 0) return null;
   let members = 0;
   let withModifiers = 0;
-  classes.forEach((cls: ClassDeclaration) => {
-    cls.getMembers().forEach((member: ClassMemberTypes) => {
-      members++;
-      // Only count members that have getModifiers (not static blocks)
+  for (const cls of classes) {
+    for (const member of cls.getMembers()) {
       if (
-        typeof (member as any).getModifiers === "function" &&
-        (member as any).getModifiers().length > 0
+        Node.isConstructorDeclaration(member) ||
+        Node.isClassStaticBlockDeclaration(member) ||
+        Node.isIndexSignatureDeclaration(member)
       ) {
-        withModifiers++;
+        continue;
       }
-    });
-  });
+      members++;
+      const hasKeyword =
+        Node.isModifierable(member) &&
+        member.getModifiers().some((m) => ACCESS_MODIFIER_KINDS.has(m.getKind()));
+      const isHashPrivate =
+        Node.isPropertyNamed(member) && Node.isPrivateIdentifier(member.getNameNode());
+      if (hasKeyword || isHashPrivate) withModifiers++;
+    }
+  }
   return members === 0 ? null : withModifiers / members;
 }
 
@@ -518,8 +532,8 @@ function isLoopInitializer(node: Node, parent: Node): boolean {
 }
 
 // `[a, b] = [b, a]`, `({ a } = obj)`, `for ([a, b] of pairs)`
-function isDestructuringAssignmentTarget(id: Identifier): boolean {
-  let node: Node = id;
+function isDestructuringAssignmentTarget(target: Node): boolean {
+  let node: Node = target;
   let parent = node.getParent();
   while (parent) {
     if (
@@ -535,7 +549,7 @@ function isDestructuringAssignmentTarget(id: Identifier): boolean {
       parent = node.getParent();
       continue;
     }
-    if (node === id) return false;
+    if (node === target) return false;
     if (
       Node.isBinaryExpression(parent) &&
       parent.getOperatorToken().getText() === "=" &&
@@ -548,16 +562,17 @@ function isDestructuringAssignmentTarget(id: Identifier): boolean {
   return false;
 }
 
-function isWriteReference(id: Identifier): boolean {
-  const parent = id.getParent();
+// Is this expression (identifier or property access) assigned to?
+function isWriteTarget(target: Node): boolean {
+  const parent = target.getParent();
   if (!parent) return false;
-  if (Node.isBinaryExpression(parent) && parent.getLeft() === id) {
+  if (Node.isBinaryExpression(parent) && parent.getLeft() === target) {
     return ASSIGNMENT_OPERATORS.has(parent.getOperatorToken().getText());
   }
   if (
     (Node.isPrefixUnaryExpression(parent) ||
       Node.isPostfixUnaryExpression(parent)) &&
-    parent.getOperand() === id
+    parent.getOperand() === target
   ) {
     const operator = parent.getOperatorToken();
     return (
@@ -565,8 +580,8 @@ function isWriteReference(id: Identifier): boolean {
       operator === SyntaxKind.MinusMinusToken
     );
   }
-  if (isLoopInitializer(id, parent)) return true;
-  return isDestructuringAssignmentTarget(id);
+  if (isLoopInitializer(target, parent)) return true;
+  return isDestructuringAssignmentTarget(target);
 }
 
 function bindingIdentifiers(declaration: VariableDeclaration): Identifier[] {
@@ -607,7 +622,7 @@ function collectWriteReferences(
 ): Map<string, Identifier[]> {
   const writes = new Map<string, Identifier[]>();
   for (const id of descendantsOfKind(sourceFile, SyntaxKind.Identifier)) {
-    if (!isWriteReference(id)) continue;
+    if (!isWriteTarget(id)) continue;
     const name = id.getText();
     const existing = writes.get(name);
     if (existing) existing.push(id);
@@ -692,20 +707,56 @@ export function calculateAvoidAssertions(sourceFile: SourceFile): MetricValue {
   return Math.max(0, 1 - assertions / totalExpressions);
 }
 
+// Names of properties assigned anywhere in the file (`x.name = ...`,
+// `x.name += ...`, `x.name++`, `[x.name] = ...`). Writes to `this.name` directly
+// inside a constructor are excluded: that is the one place `readonly` allows
+// them. Matching is by name, so it can only be lenient, never stricter.
+function collectMutatedProperties(sourceFile: SourceFile): Set<string> {
+  const mutated = new Set<string>();
+  const targets: Node[] = [
+    ...descendantsOfKind(sourceFile, SyntaxKind.PropertyAccessExpression),
+    ...descendantsOfKind(sourceFile, SyntaxKind.ElementAccessExpression),
+  ];
+  for (const target of targets) {
+    let name: string | undefined;
+    let receiver: Node | undefined;
+    if (Node.isPropertyAccessExpression(target)) {
+      name = target.getName();
+      receiver = target.getExpression();
+    } else if (Node.isElementAccessExpression(target)) {
+      const argument = target.getArgumentExpression();
+      if (argument && Node.isStringLiteral(argument)) {
+        name = argument.getLiteralText();
+        receiver = target.getExpression();
+      }
+    }
+    if (name === undefined || !isWriteTarget(target)) continue;
+    const inConstructor =
+      receiver?.getKind() === SyntaxKind.ThisKeyword &&
+      Node.isConstructorDeclaration(target.getFirstAncestor(isFunctionLike));
+    if (!inConstructor) mutated.add(name);
+  }
+  return mutated;
+}
+
+// readonly properties / properties that could be readonly. A property that is
+// reassigned outside the constructor can't be readonly, so it is not counted.
 export function calculateUseReadonly(sourceFile: SourceFile): MetricValue {
-  const properties = descendantsOfKind(sourceFile, 
+  const mutated = collectMutatedProperties(sourceFile);
+  let eligible = 0;
+  let readonlyCount = 0;
+  for (const property of descendantsOfKind(
+    sourceFile,
     SyntaxKind.PropertyDeclaration,
-  );
-  if (properties.length === 0) return null;
-  // Only PropertyDeclaration nodes have getStructure().isReadonly
-  const readonlyCount = properties.filter((p: Node) => {
-    // Defensive: check getStructure exists and isReadonly is true
-    return (
-      typeof (p as any).getStructure === "function" &&
-      (p as any).getStructure().isReadonly === true
-    );
-  }).length;
-  return readonlyCount / properties.length;
+  )) {
+    if (property.isReadonly()) {
+      eligible++;
+      readonlyCount++;
+    } else if (!mutated.has(property.getName())) {
+      eligible++;
+    }
+  }
+  return eligible === 0 ? null : readonlyCount / eligible;
 }
 
 // `using` / `await using` declarations are block scoped too, not `var`
